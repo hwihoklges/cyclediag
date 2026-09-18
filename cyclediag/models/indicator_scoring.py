@@ -396,7 +396,8 @@ def _summarize_indicators(
         late = float(s[late_m].mean()) if late_m.any() else np.nan
         delta = late - early if np.isfinite(early) and np.isfinite(late) else np.nan
         med_abs_z = float(z.median(skipna=True)) if z.notna().any() else np.nan
-        late_abs_z = float(z[late_m].median(skipna=True)) if late_m.any() else np.nan
+        late_z = z[late_m].dropna()
+        late_abs_z = float(late_z.median()) if not late_z.empty else np.nan
 
         # Indicator score in [0, 1]: how strongly this column moved.
         # Deliberately descriptive — not a mode probability.

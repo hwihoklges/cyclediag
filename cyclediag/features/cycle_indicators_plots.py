@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ._statistics import finite_pearson
+
 PANEL_SPECS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("Capacity / SoH", ("SoHQ", "CE"), "%"),
     ("EoC rest V (after charge)", ("EoC_restV_init", "EoC_restV_60s", "EoC_restV_end"), "V"),
@@ -261,7 +263,7 @@ def fit_sohq_from_rest_v_end(
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
     rmse = float(np.sqrt(np.mean((y - pred) ** 2)))
     mae = float(np.mean(np.abs(y - pred)))
-    pearson = float(np.corrcoef(y, pred)[0, 1]) if len(y) > 1 else float("nan")
+    pearson = finite_pearson(pd.Series(y), pd.Series(pred))
 
     fit = SohqRestVLinearFit(
         a_eoc=float(a),
