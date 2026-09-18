@@ -41,7 +41,7 @@ from .cell_meta import CellProtocolMeta, DEFAULT_Q_RATED_AH
 from .segment_utils import iter_rest_periods, leg_segment
 from .cc_cv import resolve_current_column
 from .signal_cv import detect_cv_signal, signal_cv_to_row
-from .units import capacity_to_ah
+from .units import capacity_to_ah, canonical_unit_factor
 from cyclediag.io.rest_voltage import extract_cycle_rest_voltages
 
 
@@ -114,6 +114,8 @@ def _leg_capacity_ah(seg: pd.DataFrame, leg: str, *, unit: str | None = None) ->
         if col not in seg.columns:
             continue
         q = pd.to_numeric(seg[col], errors="coerce")
+        if not np.isfinite(q).all() or (q < 0).any() or (q.diff() < 0).any():
+            return None
         if q.notna().any():
             return _capacity_to_ah(float(q.max()), unit=unit)
     return None
@@ -128,7 +130,7 @@ def _capacity_series(seg: pd.DataFrame, leg: str) -> np.ndarray | None:
     if col not in seg.columns:
         return None
     q = pd.to_numeric(seg[col], errors="coerce").to_numpy(dtype=float)
-    return q if np.isfinite(q).any() else None
+    return q if np.isfinite(q).all() and np.all(q >= 0) and not np.any(np.diff(q) < 0) else None
 
 
 def _relative_time_s(seg: pd.DataFrame) -> np.ndarray:
@@ -289,6 +291,17 @@ def extract_lges_cycle_row(
     raw_df: pd.DataFrame | None = None,
 ) -> dict:
     cfg = config or LgesExtractConfig()
+    if cfg.capacity_unit:
+        factor = canonical_unit_factor(cfg.capacity_unit, "ah")
+        if df.attrs.get("unit_schema") and factor != 1.0:
+            raise ValueError("Normalized input is already Ah; specify raw capacity units in ColumnMap.units")
+        if factor != 1.0:
+            # Legacy logical-frame override applies to every capacity consumer,
+            # not just maxima: energy, peaks, CC/CV and band capacities too.
+            df = df.copy()
+            for col in ("capacity", "charge_capacity", "discharge_capacity", "charge_cv_capacity", "ChargeCVCapacity"):
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce") * factor
     cycle_df = df[df["cycle"] == cycle].copy()
     if cycle_df.empty:
         return {}
@@ -301,6 +314,9 @@ def extract_lges_cycle_row(
         "feature_set": FEATURE_SET_LGES,
     }
     row.update(_empty_lges_row())
+    row["unit_warnings"] = list(df.attrs.get("unit_warnings", []))
+    row["feature_units"] = {"chgCapa": "Ah", "dchgCapa": "Ah", "chg_E": "Wh",
+                            "dchg_E": "Wh", "CE": "percent", "VE": "fraction", "EE": "fraction"}
 
     temp_col = _resolve_temperature_col(raw_df if raw_df is not None else cycle_df, cfg.temperature_col)
     seg_kw = dict(
@@ -311,8 +327,9 @@ def extract_lges_cycle_row(
     )
     chg = leg_segment(cycle_df, "charge", **seg_kw)
     dchg = leg_segment(cycle_df, "discharge", **seg_kw)
-    chg = prepare_leg_segment_for_dqdv(chg, "charge")
-    dchg = prepare_leg_segment_for_dqdv(dchg, "discharge")
+    # Peak preprocessing may trim CV: never use it for total capacity/energy.
+    peak_chg = prepare_leg_segment_for_dqdv(chg, "charge")
+    peak_dchg = prepare_leg_segment_for_dqdv(dchg, "discharge")
 
     chg_v, chg_i = _cutoff_v_i(chg)
     dchg_v, _ = _cutoff_v_i(dchg)
@@ -365,11 +382,15 @@ def extract_lges_cycle_row(
     row["EoC_dchgR_10s_T25"] = correct_r_to_25c(row.get("EoC_dchgR_10s"), row.get("dchg_temp_avg"))
     row["EoD_chgR_10s_T25"] = correct_r_to_25c(row.get("EoD_chgR_10s"), row.get("chg_temp_avg"))
 
-    cap_unit = cfg.capacity_unit
+    cap_unit = "ah"  # All capacity columns converted together above or by IO.
     chg_ah = _leg_capacity_ah(chg, "charge", unit=cap_unit)
     dchg_ah = _leg_capacity_ah(dchg, "discharge", unit=cap_unit)
     row["chgCapa"] = chg_ah
     row["dchgCapa"] = dchg_ah
+    row["capacity_status"] = {
+        "charge": "ok" if chg_ah is not None else "missing_or_invalid_counter",
+        "discharge": "ok" if dchg_ah is not None else "missing_or_invalid_counter",
+    }
     if chg_ah and dchg_ah and chg_ah > 0:
         row["CE"] = dchg_ah / chg_ah * 100.0
     else:
@@ -381,27 +402,27 @@ def extract_lges_cycle_row(
         src = cycle_df if cycle_df is not None else chg
         if cname in src.columns:
             column_cv = float(pd.to_numeric(src[cname], errors="coerce").max())
-            if cap_unit == "mah" or (column_cv is not None and column_cv > 500):
-                # only scale if explicitly mAh-sized and unit says so
-                if cap_unit == "mah":
-                    column_cv = column_cv / 1000.0
             break
     cv = detect_cv_signal(chg, column_cv_ah=column_cv)
     row.update(signal_cv_to_row(cv))
 
     chg_q = _capacity_series(chg, "charge")
     dqdv_cfg = cfg.resolved_dqdv_config()
-    if chg_q is not None and not chg.empty and "voltage" in chg.columns:
-        v = pd.to_numeric(chg["voltage"], errors="coerce").to_numpy(dtype=float)
-        row.update(peaks_to_columns("chg", find_dqdv_peaks(v, chg_q, config=dqdv_cfg), "dqdv"))
-        row.update(peaks_to_columns("chg", find_dvdq_peaks(chg_q, v, config=dqdv_cfg), "dvdq"))
+    peak_chg_q = _capacity_series(peak_chg, "charge")
+    if peak_chg_q is not None and not peak_chg.empty and "voltage" in peak_chg.columns:
+        v = pd.to_numeric(peak_chg["voltage"], errors="coerce").to_numpy(dtype=float)
+        row.update(peaks_to_columns("chg", find_dqdv_peaks(v, peak_chg_q, config=dqdv_cfg), "dqdv"))
+        row.update(peaks_to_columns("chg", find_dvdq_peaks(peak_chg_q, v, config=dqdv_cfg), "dvdq"))
 
     dchg_q = _capacity_series(dchg, "discharge")
     dchg_v = None
     if dchg_q is not None and not dchg.empty and "voltage" in dchg.columns:
         dchg_v = pd.to_numeric(dchg["voltage"], errors="coerce").to_numpy(dtype=float)
-        row.update(peaks_to_columns("dchg", find_dqdv_peaks(dchg_v, dchg_q, config=dqdv_cfg), "dqdv"))
-        row.update(peaks_to_columns("dchg", find_dvdq_peaks(dchg_q, dchg_v, config=dqdv_cfg), "dvdq"))
+    peak_dchg_q = _capacity_series(peak_dchg, "discharge")
+    if peak_dchg_q is not None and "voltage" in peak_dchg.columns:
+        peak_v = pd.to_numeric(peak_dchg["voltage"], errors="coerce").to_numpy(dtype=float)
+        row.update(peaks_to_columns("dchg", find_dqdv_peaks(peak_v, peak_dchg_q, config=dqdv_cfg), "dqdv"))
+        row.update(peaks_to_columns("dchg", find_dvdq_peaks(peak_dchg_q, peak_v, config=dqdv_cfg), "dvdq"))
 
     # SOC bands, V_avg, energy, hysteresis, plateau, IC area, IR proxy, cliff/margin
     row.update(

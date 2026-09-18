@@ -23,6 +23,7 @@ from typing import Any, Iterable, Literal
 import numpy as np
 import pandas as pd
 
+from cyclediag.features._statistics import finite_pearson
 from cyclediag.features.indicator_registry import (
     ROLE_INDICATOR,
     family_of,
@@ -172,8 +173,11 @@ def _reference_stats(
             window = ref
     else:
         window = ref
-    med = window[cols].median(numeric_only=True)
-    std = window[cols].std(numeric_only=True).replace(0, np.nan)
+    values = window.reindex(columns=cols).apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    med = values.median()
+    # Translation preserves variance and makes identical non-binary decimals
+    # exactly zero, rather than treating mean-roundoff as calibrated variance.
+    std = (values - med).std()
     return med, std
 
 
@@ -192,6 +196,7 @@ def score_indicators(
     routine_only: bool = True,
     early_frac: float = 0.2,
     grain: Literal["cycle", "summary", "both"] = "both",
+    scale_floors: dict[str, float] | None = None,
 ) -> IndicatorScoreResult:
     """Score indicators without assigning a degradation mode.
 
@@ -211,7 +216,13 @@ def score_indicators(
     grain
         ``cycle`` / ``summary`` / ``both``.
     """
+    floors = scale_floors or {}
+    if any(not np.isfinite(v) or v <= 0 for v in floors.values()):
+        raise ValueError("scale_floors must be positive finite calibrated feature scales")
     empty_meta = {
+        "score_kind": "heuristic_deviation_not_probability",
+        "zero_variance_policy": "unknown_without_calibrated_floor",
+        "scale_floors": dict(floors),
         "score_layer": "indicator",
         "routine_only": routine_only,
         "n_input_rows": 0 if features is None else int(len(features)),
@@ -237,7 +248,7 @@ def score_indicators(
         out = tagged.copy()
         out["scoring_row"] = False
         out["indicator_score"] = np.nan
-        out["indicator_flag"] = "ok"
+        out["indicator_flag"] = "unknown"
         out["indicator_top"] = ""
         out["indicator_n_scored"] = 0
         out["score_layer"] = "indicator"
@@ -248,17 +259,31 @@ def score_indicators(
             meta=empty_meta,
         )
 
-    ref_src = reference if reference is not None and not reference.empty else scored_rows
+    ref_src = reference if reference is not None else scored_rows
     if reference is None:
         ref_src = filter_scoring_rows(
             attach_protocol_flags(ref_src, raw_df), routine_only=routine_only,
         )
-    med, std = _reference_stats(ref_src, cols, early_frac=early_frac)
-
-    # --- per-cycle rollup on the scored subset ---
-    z_mat = ((scored_rows[cols] - med) / std).abs()
+    # Implicit baselines are per cell/source, never pooled across cells.
+    values = scored_rows[cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    z_mat = pd.DataFrame(np.nan, index=scored_rows.index, columns=cols)
+    constant_changed = pd.Series(0, index=scored_rows.index)
+    constant_unchanged = pd.Series(0, index=scored_rows.index)
+    group_cols = [c for c in ("cell_id", "file", "source_file") if c in scored_rows.columns]
+    groups = scored_rows.groupby(group_cols, sort=False, dropna=False) if group_cols and reference is None else [(None, scored_rows)]
+    for _, group in groups:
+        ref_group = group if reference is None else ref_src
+        med, std = _reference_stats(ref_group, cols, early_frac=early_frac)
+        delta = values.loc[group.index] - med
+        zero = std.eq(0)
+        constant_changed.loc[group.index] = (delta.ne(0) & delta.notna() & zero).sum(axis=1)
+        constant_unchanged.loc[group.index] = (delta.eq(0) & zero).sum(axis=1)
+        for col, floor in floors.items():
+            if col in std and pd.notna(std[col]):
+                std[col] = max(std[col], floor)
+        z_mat.loc[group.index] = (delta / std.replace(0, np.nan)).abs()
     z_mat = z_mat.replace([np.inf, -np.inf], np.nan)
-    row_score = (z_mat.mean(axis=1, skipna=True) / 3.0).clip(0.0, 1.0).fillna(0.0)
+    row_score = (z_mat.mean(axis=1, skipna=True) / 3.0).clip(0.0, 1.0)
     top_labels: list[str] = []
     n_scored: list[int] = []
     for idx in z_mat.index:
@@ -273,18 +298,23 @@ def score_indicators(
     cycle_out = tagged.copy()
     cycle_out["scoring_row"] = False
     cycle_out["indicator_score"] = np.nan
-    cycle_out["indicator_flag"] = "ok"
+    cycle_out["indicator_flag"] = "unknown"
+    cycle_out["indicator_constant_changed"] = constant_changed.reindex(cycle_out.index).fillna(0).astype(int)
+    cycle_out["indicator_constant_unchanged"] = constant_unchanged.reindex(cycle_out.index).fillna(0).astype(int)
     cycle_out["indicator_top"] = ""
     cycle_out["indicator_n_scored"] = 0
     cycle_out["score_layer"] = "indicator"
     cycle_out.loc[scored_rows.index, "scoring_row"] = True
     cycle_out.loc[scored_rows.index, "indicator_score"] = row_score.to_numpy()
     cycle_out.loc[scored_rows.index, "indicator_flag"] = [
-        "alert" if s >= FLAG_ALERT else ("watch" if s >= FLAG_WATCH else "ok")
+        "unknown" if not np.isfinite(s) else "alert" if s >= FLAG_ALERT else ("watch" if s >= FLAG_WATCH else "ok")
         for s in row_score.to_numpy()
     ]
     cycle_out.loc[scored_rows.index, "indicator_top"] = top_labels
     cycle_out.loc[scored_rows.index, "indicator_n_scored"] = n_scored
+    cycle_out["indicator_evidence_coverage"] = cycle_out["indicator_n_scored"] / len(cols)
+    incomplete_ok = (cycle_out["indicator_flag"] == "ok") & (cycle_out["indicator_evidence_coverage"] < 1)
+    cycle_out.loc[incomplete_ok, "indicator_flag"] = "unknown"
 
     # --- long contributions ---
     contrib_rows: list[dict[str, Any]] = []
@@ -360,13 +390,14 @@ def _summarize_indicators(
         cov = float(s.notna().mean())
         if cov < 0.05:
             continue
-        corr_cycle = float(s.corr(cyc)) if cyc is not None else np.nan
-        corr_health = float(s.corr(pd.to_numeric(df[hcol], errors="coerce"))) if hcol else np.nan
+        corr_cycle = finite_pearson(s, cyc) if cyc is not None else np.nan
+        corr_health = finite_pearson(s, df[hcol]) if hcol else np.nan
         early = float(s[early_m].mean()) if early_m.any() else np.nan
         late = float(s[late_m].mean()) if late_m.any() else np.nan
         delta = late - early if np.isfinite(early) and np.isfinite(late) else np.nan
         med_abs_z = float(z.median(skipna=True)) if z.notna().any() else np.nan
-        late_abs_z = float(z[late_m].median(skipna=True)) if late_m.any() else np.nan
+        late_z = z[late_m].dropna()
+        late_abs_z = float(late_z.median()) if not late_z.empty else np.nan
 
         # Indicator score in [0, 1]: how strongly this column moved.
         # Deliberately descriptive — not a mode probability.
@@ -379,13 +410,15 @@ def _summarize_indicators(
             parts.append(float(np.clip(late_abs_z / 3.0, 0.0, 1.0)))
         elif np.isfinite(med_abs_z):
             parts.append(float(np.clip(med_abs_z / 3.0, 0.0, 1.0)))
-        score = float(np.clip(max(parts) if parts else 0.0, 0.0, 1.0))
+        score = float(np.clip(max(parts), 0.0, 1.0)) if parts and z.notna().any() else np.nan
 
         rows.append({
             "feature": col,
             "family": family_of(col),
             "role": ROLE_INDICATOR,
             "coverage": cov,
+            "scored_evidence_coverage": float(z.notna().mean()),
+            "status": "scored" if z.notna().any() else "unknown",
             "corr_cycle": corr_cycle,
             "corr_health": corr_health,
             "early_mean": early,

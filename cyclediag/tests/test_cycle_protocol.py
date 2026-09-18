@@ -22,7 +22,7 @@ def _step_row(cycle: int, dchg_mah: float, n_steps: int = 4, i_abs: float = 1000
         rows.append({
             "cycle": cycle,
             "step_type": st,
-            "discharge_capacity": dchg,
+            "discharge_capacity": dchg / 1000.0,
             "current": cur,
         })
     return pd.DataFrame(rows)
@@ -45,7 +45,9 @@ def test_capacheck_low_dchg_excluded():
         {"cycle": 4, "step_type": "charge", "discharge_capacity": 0, "current": 1000},
         {"cycle": 4, "step_type": "rest", "discharge_capacity": 0, "current": 0},
     ]
-    excl = build_protocol_exclusion(pd.DataFrame(rows))
+    step_df = pd.DataFrame(rows)
+    step_df["discharge_capacity"] /= 1000.0  # Explicit raw mAh boundary.
+    excl = build_protocol_exclusion(step_df)
     assert 4 in excl.excluded
     assert 4 in excl.capacheck_cycles
 

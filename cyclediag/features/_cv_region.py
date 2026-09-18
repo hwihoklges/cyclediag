@@ -42,7 +42,10 @@ def resolve_current_column(df: pd.DataFrame) -> str | None:
             priority.append(col)
         elif clean in ("current", "curr", "i", "currenta", "currentma"):
             fallback.append(col)
-    for col in priority + fallback:
+    # Normalization owns unit conversion; don't bypass canonical A with a raw
+    # auxiliary AvgCurrent(mA) column that was intentionally left untouched.
+    ordered = (["current"] if "current" in df.columns else []) + priority + fallback
+    for col in dict.fromkeys(ordered):
         series = pd.to_numeric(df[col], errors="coerce").abs()
         valid = series[np.isfinite(series) & (series > 0)]
         if len(valid) >= 4:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from cyclediag.features._statistics import finite_pearson
 from cyclediag.features.indicator_registry import (
     ROLE_COVARIATE,
     ROLE_INDICATOR,
@@ -73,10 +74,10 @@ def screen_indicators(
         if not np.isfinite(std) or std < 1e-12:
             continue
 
-        corr_cycle = s.corr(pd.to_numeric(df["cycle"], errors="coerce"))
-        corr_health = None
+        corr_cycle = finite_pearson(s, df["cycle"])
+        corr_health = np.nan
         if hcol:
-            corr_health = s.corr(pd.to_numeric(df[hcol], errors="coerce"))
+            corr_health = finite_pearson(s, df[hcol])
 
         b = base_row.get(col)
         delta_vs_ref = None
@@ -111,8 +112,8 @@ def screen_indicators(
         rows.append({
             "feature": col,
             "coverage_pct": round(cov, 1),
-            "corr_cycle": round(float(corr_cycle), 3) if pd.notna(corr_cycle) else None,
-            "corr_health": round(float(corr_health), 3) if corr_health is not None and pd.notna(corr_health) else None,
+            "corr_cycle": round(float(corr_cycle), 3),
+            "corr_health": round(float(corr_health), 3),
             "delta_vs_ref": delta_vs_ref,
             "delta_late_early": delta_late_early,
             "severity": round(sev, 3),
@@ -192,9 +193,9 @@ def compare_cells(
             continue
         # trend of spread (growing divergence?)
         spread_vals = spread.dropna()
-        spread_corr = None
+        spread_corr = np.nan
         if len(spread_vals) >= 3:
-            spread_corr = spread_vals.corr(
+            spread_corr = finite_pearson(spread_vals,
                 pd.Series(spread_vals.index.astype(float), index=spread_vals.index)
             )
         cell_means = pivot.mean(skipna=True)
@@ -203,7 +204,7 @@ def compare_cells(
             "feature": col,
             "mean_spread_late": round(mean_spread, 6),
             "max_cell_gap_late": round(pair_diff, 6),
-            "spread_trend_r": round(float(spread_corr), 3) if pd.notna(spread_corr) else None,
+            "spread_trend_r": round(float(spread_corr), 3),
             "n_cells": int(pivot.shape[1]),
         })
 

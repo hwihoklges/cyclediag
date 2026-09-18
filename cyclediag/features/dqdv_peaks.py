@@ -211,7 +211,35 @@ def compute_dvdq(
     v: np.ndarray,
     config: DqdvPeakConfig | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    _, _, qx, dvdq = prepare_dqdv_arrays(v, q, config)
+    # dQ/dV's minimum voltage increment is a denominator guard. Applying it
+    # to dV/dQ discards valid shallow slopes and changes the capacity domain.
+    from ._dqdv_interp import (
+        interpolate_dqdv_segment,
+        normalize_deriv_mode,
+        resolve_dqdv_interp_axis,
+        smooth_state_columns,
+    )
+
+    cfg = config or DEFAULT_DQDV_PEAK_CONFIG
+    q, v = np.asarray(q, dtype=float), np.asarray(v, dtype=float)
+    valid = np.isfinite(q) & np.isfinite(v)
+    q, v = q[valid], v[valid]
+    if len(q) < 4:
+        return np.array([]), np.array([])
+    axis = resolve_dqdv_interp_axis(v, q, cfg.interp_axis)
+    grid = interpolate_dqdv_segment(
+        pd.DataFrame({"voltage": v, "capacity": q}), "voltage", "capacity",
+        axis=axis, num_points=max(int(cfg.n_interp), 2),
+    )
+    if normalize_deriv_mode(cfg.deriv_mode) == "smooth_then_diff":
+        grid = smooth_state_columns(
+            grid, "voltage", "capacity", window=cfg.sg_window, poly=cfg.sg_poly,
+        )
+    qx = grid["capacity"].to_numpy(dtype=float)
+    dq = np.diff(qx)
+    dvdq = np.divide(np.diff(grid["voltage"].to_numpy(dtype=float)), dq,
+                     out=np.full(dq.shape, np.nan), where=dq != 0)
+    qx = qx[1:]
     mask = np.isfinite(qx) & np.isfinite(dvdq)
     return qx[mask], dvdq[mask]
 

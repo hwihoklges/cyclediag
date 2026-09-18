@@ -102,10 +102,31 @@ def _evidence_for_term(
     val = _finite(row.get(feat))
     if val is None:
         return feat, None
+    # Preserve raw CE in the input; out-of-range cycle accounting is not
+    # evidence for or against a particular degradation mechanism.
+    if feat in {"CE", "CE_local_20"} and not 0 <= val <= 100:
+        return feat, None
+    if feat == "VE":
+        units = row.get("feature_units")
+        if isinstance(units, Mapping) and units.get("VE", "fraction") != "fraction":
+            return feat, None
+        if not 0 < val <= 1:
+            return feat, None
+    if feat == "CI_per_hour" and (_finite(row.get("CE")) or 0) > 100:
+        return feat, None
+    if feat.startswith(("R_ct", "R_ohmic", "A_diff", "tau_ct")):
+        suffix = feat[feat.rfind("_soc"):] if "_soc" in feat else ""
+        fit_valid = row.get(f"dcir_fit_valid{suffix}")
+        if fit_valid is not None and not bool(fit_valid):
+            return feat, None
     baseline = None
-    if term.get("direction") == "decrease_vs_baseline" and baseline_row is not None:
+    if term.get("direction") == "decrease_vs_baseline":
         ref = term.get("baseline_ref") or feat
-        baseline = _finite(baseline_row.get(ref))
+        baseline = _finite((baseline_row or {}).get(ref))
+        if baseline is None or baseline == 0:
+            return feat, None
+        if feat == "VE" and not 0 < baseline <= 1:
+            return feat, None
     signed = _signed_evidence(
         val,
         direction=str(term.get("direction", "increase")),
@@ -131,12 +152,22 @@ def score_mode_for_row(
     conflict_thr = float(config.get("conflict_threshold", 0.25))
     min_ev = int(config.get("min_evidence_for_valid", 2))
     collision_thr = float(config.get("mode_collision_score", 0.65))
+    from .constraints import scientific_validity
+    validity = scientific_validity(row, config)
+    validity["warnings"].extend(
+        f"missing_baseline:{term.get('baseline_ref') or term['feature']}"
+        for term in evidence_terms
+        if term.get("direction") == "decrease_vs_baseline"
+        and _finite((baseline_row or {}).get(term.get("baseline_ref") or term["feature"])) in (None, 0)
+    )
 
     weights: list[float] = []
     signed_vals: list[float] = []
     names: list[str] = []
     for term in evidence_terms:
         w = float(term.get("weight", 1.0))
+        if not math.isfinite(w) or w <= 0:
+            continue
         name, signed = _evidence_for_term(row, term, baseline_row)
         if signed is None:
             continue
@@ -159,6 +190,7 @@ def score_mode_for_row(
             conflicting_features=[],
             data_quality_score=data_quality,
             diagnosis_valid=False,
+            scientific_validity=validity,
             diagnosis_version=str(config.get("diagnosis_version", DIAGNOSIS_VERSION_FULLCELL)),
             diagnosis_method=str(config.get("diagnosis_method", "rule_pattern")),
             diagnosis_model_version=str(
@@ -206,6 +238,9 @@ def score_mode_for_row(
 
     conf = float(np.clip(conf, 0.0, 1.0))
     valid = n >= min_ev and dq >= 0.3 and conf >= 0.25 and conf > 0.0
+    valid = valid and validity["domain_status"] != "mismatch"
+    if validity["domain_status"] == "mismatch":
+        conf = 0.0
 
     return DiagnosisResult(
         degradation_mode=mode,
@@ -218,6 +253,9 @@ def score_mode_for_row(
         conflicting_features=conflicting,
         data_quality_score=dq,
         diagnosis_valid=valid,
+        status="heuristic_support" if valid else "insufficient_or_invalid_evidence",
+        evidence_coverage=data_quality,
+        scientific_validity=validity,
         diagnosis_version=str(config.get("diagnosis_version", DIAGNOSIS_VERSION_FULLCELL)),
         diagnosis_method=str(config.get("diagnosis_method", "rule_pattern")),
         diagnosis_model_version=str(

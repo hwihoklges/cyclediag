@@ -96,9 +96,8 @@ def _dchg_ah(grp: pd.DataFrame) -> float:
 
         return 0.0
 
-    dchg_mah = float(caps.max())
-
-    return dchg_mah / 1000.0 if dchg_mah > 200 else dchg_mah
+    # Normalization owns raw-unit conversion; bare logical columns are Ah.
+    return float(caps.max())
 
 
 

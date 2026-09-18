@@ -102,7 +102,12 @@ def test_preflight_runs_on_synthetic():
         n_grid=200,
     )
     table = run_preflight_checks(raw, step_df=None, config=cfg)
-    assert len(table) == 5
+    checks = table["check_id"].astype(str)
+    assert checks.is_unique
+    assert set(checks) == {"1", "2", "3", "4", "4b", "5"}
+    items = table.assign(check_id=checks).set_index("check_id")["item"]
+    assert items["4"] == "RPT_C3_resolved_peaks_full_dqdv"
+    assert items["4b"] == "RPT_C3_resolved_peaks_interior_dvdq"
     assert "status" in table.columns
 
 

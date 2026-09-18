@@ -34,7 +34,7 @@
       "evidence": [
         {"feature": "R_ct_soc50", "direction": "increase", "weight": 1.4, "scale": 0.5},
         {"feature": "tau_ct_soc50", "direction": "increase", "weight": 1.0, "scale": 2.0},
-        {"feature": "VE", "direction": "decrease", "weight": 1.1, "scale": 0.05},
+        {"feature": "VE", "direction": "decrease_vs_baseline", "baseline_ref": "VE", "unit": "fraction", "weight": 1.1, "scale": 0.05},
         {"feature": "EoC_dchgR_60s_inc", "direction": "increase", "weight": 0.9, "scale": 25.0},
         {"feature": "tau_CV", "direction": "increase", "weight": 0.7, "scale": 200.0}
       ]
@@ -46,7 +46,7 @@
         {"feature": "CI_per_hour", "direction": "increase", "weight": 1.3, "scale": 0.5,
          "note": "CE removed — duration-normalized inefficiency is the cleaner coulombic signal"},
         {"feature": "R_ct_soc50", "direction": "increase", "weight": 1.1, "scale": 0.5},
-        {"feature": "VE", "direction": "decrease", "weight": 1.0, "scale": 0.05}
+        {"feature": "VE", "direction": "decrease_vs_baseline", "baseline_ref": "VE", "unit": "fraction", "weight": 1.0, "scale": 0.05}
       ]
     },
     "microshort": {
@@ -76,7 +76,7 @@
         {"feature": "ocv_parallel_shift", "direction": "increase", "weight": 1.2, "scale": 0.05},
         {"feature": "delta_EoD_restV_end", "direction": "increase", "weight": 1.2, "scale": 0.05},
         {"feature": "delta_dchg_V_cutoff_margin", "direction": "decrease", "weight": 1.0, "scale": 0.05},
-        {"feature": "VE", "direction": "decrease", "weight": 0.9, "scale": 0.05},
+        {"feature": "VE", "direction": "decrease_vs_baseline", "baseline_ref": "VE", "unit": "fraction", "weight": 0.9, "scale": 0.05},
         {"feature": "V_inf_est_soc50", "direction": "either", "weight": 0.5, "scale": 0.02},
         {"feature": "CE", "direction": "decrease_from_100", "weight": 0.35, "scale": 2.0,
          "note": "demoted: set4 CE is often >100 and RPT-spike contaminated; use as weak auxiliary only"}

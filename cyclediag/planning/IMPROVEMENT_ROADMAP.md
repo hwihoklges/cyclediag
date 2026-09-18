@@ -1,5 +1,9 @@
 # cyclediag 개선 로드맵 · 통합판
 
+> **2026-09-18 reproducibility update:** bounded input/config/code provenance and checked feature CSV sidecars are implemented for selected high-level API/CLI entry points. See [implemented scope and remaining work](REPRODUCIBILITY.md); older all-pipeline manifest proposals below are not claims of complete coverage.
+
+> **2026-09 정확성 리뷰 추가:** 아래 연구 제안과 이력은 보존한다. 현재 단위·품질 게이트의 실제 범위, full-cell/ECM 비식별성, 단계별 독립 검증 기준은 [과학적 리뷰](SCIENTIFIC_REVIEW_2026-09.md)를 함께 적용한다. “구현됨”은 메커니즘 식별이나 외부 검증 완료가 아니다.
+
 > **대상 셀:** ASSB SJ900 (S83S 양극 / SJ-ASG903-1300 Si-rich 음극), 2.5–4.2 V, 45 °C
 > **프로토콜:** routine 0.5C CC-CV · C/3 RPT 2사이클 (약 105 사이클 주기) · DC-IR (SOC 20/50/80, 방전, 1C, 30 s)
 > **기준 데이터:** SJ900 set4 Ch22 (564 cycles, SoHQ ~65 %), Ch25

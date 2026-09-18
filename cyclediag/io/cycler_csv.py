@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Mapping
+from dataclasses import dataclass, field
+import re
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -21,7 +22,13 @@ PNE_DEFAULT_COLUMNS: dict[str, str] = {
 
 @dataclass
 class ColumnMap:
-    """Maps logical fields to CSV column names."""
+    """Maps logical fields to CSV columns; ``units`` maps logical names to units.
+
+    Explicit units must agree with labelled headers (conflicts raise ValueError).
+    Bare columns retain the historical canonical-unit assumption, recorded in
+    attrs['unit_metadata'] and attrs['unit_warnings']; never infer magnitude.
+    Normalized frames use A, Ah, V, s and may be normalized again unchanged.
+    """
 
     cycle: str = "CycleIndex"
     voltage: str = "Voltage(V)"
@@ -33,6 +40,7 @@ class ColumnMap:
     data_point: str = "Data_Point"
     discharge_capacity: str = "DischargeCapacity"
     temperature: str = "Temperature"
+    units: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def pne_default(cls) -> ColumnMap:
@@ -71,7 +79,7 @@ def _resolve_column(
         return name
 
     def _norm(label: str) -> str:
-        return str(label).split("(")[0].replace(" ", "").replace("_", "").lower()
+        return re.split(r"[\[(]", str(label))[0].replace(" ", "").replace("_", "").lower()
 
     # Alias priority first (more specific names listed before bare names).
     for alias in (name, *aliases):
@@ -97,9 +105,9 @@ _TEMP_ALIASES = ("Temperature", "Temp", "CellTemp", "Aux_Temperature", "AuxTemp"
 
 def normalize_cycler_dataframe(
     df: pd.DataFrame,
-    column_map: ColumnMap | Mapping[str, str] | None = None,
+    column_map: ColumnMap | Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Rename raw cycler columns to logical names (in-memory, no file read)."""
+    """Rename and convert labelled quantities to A, Ah, V, s; preserve provenance."""
     if column_map is None:
         cmap = ColumnMap.pne_default()
     elif isinstance(column_map, ColumnMap):
@@ -111,7 +119,7 @@ def normalize_cycler_dataframe(
     used: set[str] = set()
 
     def _map(logical: str, preferred: str, aliases: tuple[str, ...]) -> None:
-        resolved = _resolve_column(df, preferred, aliases, exclude=used)
+        resolved = logical if logical in df.columns else _resolve_column(df, preferred, aliases, exclude=used)
         if resolved:
             rename[resolved] = logical
             used.add(resolved)
@@ -124,25 +132,71 @@ def normalize_cycler_dataframe(
     _map("step_time", cmap.step_time, _STEP_TIME_ALIASES)
     _map("data_point", cmap.data_point, ("Data_Point", "DataPoint"))
     _map("temperature", cmap.temperature, _TEMP_ALIASES)
+    _map("charge_cv_capacity", "ChargeCVCapacity", ("ChargeCVCapacity",))
 
-    charge_cap = _resolve_column(df, cmap.capacity, _CHARGE_CAP_ALIASES, exclude=used)
+    charge_cap = "charge_capacity" if "charge_capacity" in df.columns else _resolve_column(df, cmap.capacity, _CHARGE_CAP_ALIASES, exclude=used)
     if charge_cap:
         rename[charge_cap] = "charge_capacity"
         used.add(charge_cap)
 
-    discharge_cap = _resolve_column(
+    discharge_cap = "discharge_capacity" if "discharge_capacity" in df.columns else _resolve_column(
         df, cmap.discharge_capacity, _DISCHARGE_CAP_ALIASES, exclude=used,
     )
     if discharge_cap:
         rename[discharge_cap] = "discharge_capacity"
         used.add(discharge_cap)
 
-    out = df.rename(columns=rename)
+    out = df.rename(columns=rename).copy()
+    from cyclediag.features.units import canonical_unit_factor, parse_unit_from_header
+
+    dimensions = {
+        "current": "a", "voltage": "v", "time": "s", "step_time": "s",
+        "capacity": "ah", "charge_capacity": "ah", "discharge_capacity": "ah",
+        "charge_cv_capacity": "ah",
+    }
+    unknown = set(cmap.units) - set(dimensions)
+    if unknown:
+        raise ValueError(f"Unknown logical unit fields: {sorted(unknown)}")
+    metadata = dict(df.attrs.get("unit_metadata", {}))
+    warnings = list(df.attrs.get("unit_warnings", []))
+    sources = {logical: source for source, logical in rename.items()}
+    for logical, canonical in dimensions.items():
+        if logical not in out.columns:
+            continue
+        source = sources.get(logical, logical)
+        base = re.split(r"[\[(]", str(source))[0].replace(" ", "").replace("_", "").lower()
+        candidates = [str(c) for c in df.columns if re.split(r"[\[(]", str(c))[0].replace(" ", "").replace("_", "").lower() == base]
+        if len(candidates) > 1:
+            warnings.append(f"ambiguous_columns:{logical}:selected={source}:candidates={','.join(candidates)}")
+        explicit = cmap.units.get(logical)
+        if explicit is None and canonical == "ah":
+            explicit = cmap.units.get("capacity")
+        if logical in metadata:
+            # Overrides describe input values, not the original pre-conversion CSV.
+            if explicit and canonical_unit_factor(explicit, canonical) != 1.0:
+                raise ValueError(f"{logical} is already canonical; set raw units before normalization")
+            continue
+        header_unit = parse_unit_from_header(source)
+        if header_unit is None and re.search(r"[\[(].+[\])]", source):
+            raise ValueError(f"Unsupported unit-bearing header: {source}")
+        if explicit and header_unit:
+            if canonical_unit_factor(explicit, canonical) != canonical_unit_factor(header_unit, canonical):
+                raise ValueError(f"Conflicting units for {source}: {explicit} vs {header_unit}")
+        unit = explicit or header_unit or canonical
+        factor = canonical_unit_factor(unit, canonical)
+        out[logical] = pd.to_numeric(out[logical], errors="coerce") * factor
+        status = "explicit" if explicit else "header" if header_unit else "assumed_canonical"
+        metadata[logical] = {"source_column": source, "source_unit": unit,
+                             "unit": canonical, "factor": factor, "status": status}
+        if status == "assumed_canonical":
+            warnings.append(f"unit_assumed:{logical}:{canonical}")
 
     if "charge_capacity" in out.columns:
         out["capacity"] = out["charge_capacity"]
+        metadata["capacity"] = dict(metadata["charge_capacity"])
     elif "discharge_capacity" in out.columns:
         out["capacity"] = out["discharge_capacity"]
+        metadata["capacity"] = dict(metadata["discharge_capacity"])
 
     numeric_cols = (
         "cycle", "voltage", "capacity", "charge_capacity", "discharge_capacity",
@@ -154,12 +208,16 @@ def normalize_cycler_dataframe(
     if "cycle" in out.columns:
         out = out.dropna(subset=["cycle"])
         out["cycle"] = out["cycle"].astype(int)
+    out.attrs["unit_metadata"] = metadata
+    out.attrs["unit_warnings"] = list(dict.fromkeys(warnings))
+    out.attrs["unit_schema"] = "canonical_A_Ah_V_s_v1"
+    out.attrs["unit_missing_fields"] = [c for c in ("current", "voltage", "capacity", "time") if c not in out.columns]
     return out
 
 
 def load_cycler_csv(
     path: str,
-    column_map: ColumnMap | Mapping[str, str] | None = None,
+    column_map: ColumnMap | Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Load CSV and rename to logical column names where possible."""
     df = pd.read_csv(path, on_bad_lines="skip")

@@ -8,7 +8,7 @@ import pytest
 from cyclediag.features.extract import FeatureConfig, extract_features_table
 from cyclediag.features.lges_catalog import FEATURE_SET_LGES, all_lges_feature_columns
 from cyclediag.features.lges_extract import LgesExtractConfig, extract_lges_features_table
-from cyclediag.io.cycler_csv import normalize_cycler_dataframe
+from cyclediag.io.cycler_csv import ColumnMap, normalize_cycler_dataframe
 
 
 def _cycle_df(cycle: int = 1, q_scale: float = 1.0) -> pd.DataFrame:
@@ -82,7 +82,7 @@ def test_lges_discharge_capacity_from_studio_columns():
         "TotalTime_sec": list(range(95)),
         "StepTime_sec": list(range(95)),
     })
-    df = normalize_cycler_dataframe(raw)
+    df = normalize_cycler_dataframe(raw, ColumnMap(units={"capacity": "mAh"}))
     out = extract_lges_features_table(df, config=LgesExtractConfig())
     assert out["dchgCapa"].iloc[0] == pytest.approx(2.85, rel=0.01)
     assert out["chgCapa"].iloc[0] == pytest.approx(3.0, rel=0.01)

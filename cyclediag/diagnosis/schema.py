@@ -27,6 +27,14 @@ class DiagnosisResult:
     diagnosis_version: str = DIAGNOSIS_VERSION_FULLCELL
     diagnosis_method: str = "rule_pattern"
     diagnosis_model_version: str = DIAGNOSIS_MODEL_VERSION
+    status: str = "unknown"
+    evidence_coverage: float = 0.0
+    scientific_validity: dict[str, Any] = field(default_factory=lambda: {
+        "score_kind": "heuristic_pattern_support",
+        "confidence_kind": "uncalibrated_heuristic_not_probability",
+        "causally_identified": False,
+        "validated_probability": False,
+    })
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
