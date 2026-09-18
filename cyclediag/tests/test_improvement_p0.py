@@ -86,7 +86,7 @@ def test_quality_metrics_basic():
         "temperature": np.zeros(200),
     })
     q = cycle_quality_metrics(df)
-    assert q["temperature_available"] is False
+    assert q["temperature_available"] is True  # zero degrees C is a valid measurement
     assert q["samples_per_mV"] is not None
     assert q["quality_score"] is not None
 

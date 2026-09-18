@@ -2,8 +2,7 @@
 
 **갱신:** 2026-08-06 · 버전: [VERSIONS.md](VERSIONS.md)
 
-> **코드 상태:** **v0.1 (Planning)** — planning/specs + 최소 패키지 골격만 존재.  
-> **다음:** Phase 0 완료 → Phase 1 feature 추출 MVP
+> **역사적 계획:** 아래 Phase 표는 초기 계획과 후속 연구 이력을 보존한다. 현재 코드는 추출·진단·보고서 및 회귀 테스트를 포함하므로 “최소 골격만 존재”하는 상태가 아니다. 구현과 과학 검증 상태는 [2026-09 리뷰](SCIENTIFIC_REVIEW_2026-09.md)를 우선 확인한다.
 
 ---
 
@@ -263,3 +262,9 @@ cyclediag는 **사이클×leg 단위 feature 추출**을 배치로 돌린다. pn
 - [ ] Charge only vs charge+discharge feature
 - [ ] 사이클 번호: formation만 vs 전체 life
 - [ ] 외부 라이브러리: `scikit-learn`, `xgboost`, `pyod` (이상탐지)
+
+## 2026-09-18 Review — 과학적 정확성과 실행 순서
+
+[과학적 계약 및 외부 검증 계획](SCIENTIFIC_REVIEW_2026-09.md)에 이번 리뷰의 구현됨/계획/실험적 상태와 단위·CE/VE·IR·peak·품질 게이트 한계를 정리했다. 기존 상세 알고리즘 제안은 삭제하지 않는다.
+
+우선순위는 **데이터 계약 → 검증된 feature 추출 → 독립 측정으로 외부 검증한 진단 → 재현 가능한 batch/cloud·보고서**다. Full-cell proxy와 미교정 confidence를 원인 확률로 승격하지 않는다. 데이터 부족은 unknown으로 보존하며, cell 및 batch hold-out·독립 용량/OCV/조건에 맞는 half-cell/EIS 검증과 result hash/config 영속화는 별도 인수 대상이다.

@@ -1,5 +1,7 @@
 # dQ/dV Peak Tracking — 단계별 로드맵
 
+> **2026-09 정확성 리뷰 추가:** 기존 peak 학습·추적 계획은 유지한다. [과학적 리뷰](SCIENTIFIC_REVIEW_2026-09.md)의 noise/smoothing artifact, phase 해석 제한, cell·batch hold-out 및 train-only golden/tuning 규칙을 적용한다. peak matching 성공이나 합성 ground truth 재현은 실제 열화 원인 증명이 아니다.
+
 **갱신:** 2026-08-06  
 **관련:** [ROADMAP.md](ROADMAP.md) Phase 1~2, [FEATURES.md](FEATURES.md) Tier 2, [GOLDEN_CYCLES.md](GOLDEN_CYCLES.md), [IMPROVEMENT_ROADMAP.md §12.5](IMPROVEMENT_ROADMAP.md#125-diffcapanalyzer에서-가져올-것-ica-피크-descriptor) (DiffCapAnalyzer peak descriptor)
 

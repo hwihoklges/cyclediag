@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -17,6 +18,7 @@ from cyclediag.features.lges_extract import LgesExtractConfig, extract_lges_feat
 from cyclediag.io.cycler_csv import ColumnMap, load_cycler_csv, normalize_cycler_dataframe
 from cyclediag.models.indicator_scoring import score_indicators, top_scored_indicators
 from cyclediag.models.predict import predict_features
+from cyclediag.provenance import attach_provenance, build_provenance, config_hash
 
 
 def extract_features(
@@ -29,7 +31,8 @@ def extract_features(
 ) -> pd.DataFrame:
     """Load (if needed) and extract LGES cycle indicators."""
     cmap = column_map or ColumnMap.studio_default()
-    cfg = config or LgesExtractConfig()
+    cfg = deepcopy(config) if config is not None else LgesExtractConfig()
+    cycles = list(cycles) if cycles is not None else None
     if isinstance(source, pd.DataFrame):
         df = normalize_cycler_dataframe(source.copy(), column_map=cmap)
         path = filepath or str(cfg.cell_id or "dataframe")
@@ -38,13 +41,16 @@ def extract_features(
         df = load_cycler_csv(path, column_map=cmap)
         if cfg.cell_id is None:
             cfg.cell_id = Path(path).stem
-    return extract_lges_features_table(
+    provenance = build_provenance(source, df, config=cfg, column_map=cmap, cycles=cycles,
+                                  selectors={"entry_point": "extract_features"})
+    table = extract_lges_features_table(
         df,
         cycles=cycles,
         filepath=path,
         config=cfg,
         raw_df=df,
     )
+    return attach_provenance(table, df, provenance)
 
 
 def score_dataframe(
@@ -144,7 +150,15 @@ def diagnose_csv(
         column_map=column_map,
         config=config,
     )
-    return diagnose_dataframe(feats, with_screen=with_screen)
+    result = diagnose_dataframe(feats, with_screen=with_screen)
+    provenance = deepcopy(feats.attrs["provenance"])
+    provenance["extraction_config_sha256"] = provenance["config_sha256"]
+    provenance["config_sha256"] = config_hash({
+        "extraction": provenance["extraction_config_sha256"],
+        "with_screen": with_screen, "routine_only": True, "entry_point": "diagnose_csv",
+    })
+    result["provenance"] = provenance
+    return result
 
 
 def diagnose_folder(

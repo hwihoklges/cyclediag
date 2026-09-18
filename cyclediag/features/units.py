@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from typing import Any
 
 
@@ -16,6 +17,13 @@ def parse_unit_from_header(header: str | None) -> str | None:
     if not header:
         return None
     h = str(header)
+    bracket = re.search(r"[\[(]\s*([^\])]+)\s*[\])]", h)
+    if bracket:
+        unit = bracket.group(1).strip().lower()
+        if unit in {"a", "ma", "ah", "mah", "v", "mv", "s", "sec", "min", "h", "ms"}:
+            return unit
+    if h.lower().endswith("_sec"):
+        return "s"
     m = _UNIT_RE.search(h)
     if m:
         return m.group("u").lower().replace("°", "deg")
@@ -31,6 +39,20 @@ def parse_unit_from_header(header: str | None) -> str | None:
     return None
 
 
+def canonical_unit_factor(unit: str, canonical: str) -> float:
+    """Supported dimensional conversions only; no magnitude-based inference."""
+    factors = {
+        "a": {"a": 1.0, "ma": 0.001},
+        "ah": {"ah": 1.0, "mah": 0.001, "a*h": 1.0, "a·h": 1.0},
+        "v": {"v": 1.0, "mv": 0.001},
+        "s": {"s": 1.0, "sec": 1.0, "ms": 0.001, "min": 60.0, "h": 3600.0},
+    }
+    try:
+        return factors[canonical.lower()][unit.strip().lower()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported {canonical} unit: {unit}") from exc
+
+
 def capacity_to_ah(
     q: Any,
     *,
@@ -42,13 +64,11 @@ def capacity_to_ah(
         v = float(q)
     except (TypeError, ValueError):
         return None
-    if not (v == v):  # NaN
+    if not math.isfinite(v):
         return None
     u = (unit or parse_unit_from_header(header) or "").lower()
-    if u in {"mah", "mah"}:
-        return v / 1000.0
-    if u in {"ah", "a·h", "a*h"}:
-        return v
+    if u:
+        return v * canonical_unit_factor(u, "ah")
     # Logical columns after normalize are already Ah for Studio Ah exports.
     # Do NOT divide large values — that heuristic breaks ~72 Ah cells.
     return v
@@ -64,9 +84,7 @@ def current_to_a(
         v = float(i)
     except (TypeError, ValueError):
         return None
-    if not (v == v):
+    if not math.isfinite(v):
         return None
     u = (unit or parse_unit_from_header(header) or "").lower()
-    if u == "ma":
-        return v / 1000.0
-    return v
+    return v * canonical_unit_factor(u or "a", "a")

@@ -6,6 +6,12 @@ GUI 없음 · `pne_studio2` 불필요 · 단독 구동.
 
 **Version:** 1.0.0
 
+## 2026-09 정확성 리뷰
+
+[과학적 계약·검증 계획·단계별 로드맵](cyclediag/planning/SCIENTIFIC_REVIEW_2026-09.md)을 먼저 확인하세요. 내부 단위는 A/Ah/V/s, `f_Q_spec`은 mAh/g입니다. 명시적 `ColumnMap.units`와 헤더 단위의 충돌은 오류이며, 단위 없는 입력은 canonical 가정 경고를 남깁니다. `DataFrame.attrs`만으로 영속 추적성을 보장하지 않습니다.
+
+**unknown ≠ 건강함.** 미교정 점수는 확률이 아니며 full-cell LLI/LAM/kinetics proxy는 원인을 유일하게 식별하지 못합니다. 구현된 수치 방어와 외부 과학 검증 완료를 구분합니다. 기존 연구 로드맵은 보존하고 새 문서에 단계별 의존성·인수 기준을 연결했습니다.
+
 ## Example fixtures (Git LFS) — **DOE1 / DOE2 / DOE3**
 
 비교할 때 **`DOE1`**, **`DOE2`**, **`DOE3`** 만 말하면 됩니다.  
@@ -74,7 +80,7 @@ python -m cyclediag.tools.run_sohq_bp_presentation --cells M01Ch022 --step 40 --
 
 Outputs per cell: `*_sohq_dsohq_regimes.png`, `*_BP1_BP2_VQ_dQdV.png`, regime slope CSV.
 
-**Cloud / CI:** GitHub Actions workflow `cyclediag-ci` runs pytest + this presentation (artifact upload).  
+**Cloud / CI:** `cyclediag-ci`는 Python 3.10/3.14, Ubuntu/Windows의 3개 조합에서 전체 단위 테스트를 **LFS 없이** 실행합니다. fixture skip은 JUnit과 `-rs`로 공개합니다. Presentation은 별도 수동 `cyclediag-integration` workflow에서 `run_integration=true`를 선택해야 하며 M01Ch022 raw 한 파일만 받습니다. 의존성 목록과 결과를 artifact로 보존합니다.
 Cursor Cloud Agents: clone this repo → install via `.cursor/environment.json` → run the same command.
 
 ## dVdQ@SOC0 Origin OLE PowerPoint
@@ -89,6 +95,14 @@ python cyclediag/tools/build_dvdq_soc0_slides.py --skip-raw
 ```
 
 출력: `example/output/dvdq_soc0_slides/`
+
+## Bounded reproducibility
+
+High-level `extract_features` / `diagnose_csv` and CLI extraction now record input,
+configuration and code digests. Feature CSV exports support checked JSON sidecars
+for provenance, units and scientific warnings. See
+[reproducibility support and limits](cyclediag/planning/REPRODUCIBILITY.md)
+for exact integrated entry points, privacy behavior and remaining roadmap scope.
 
 ## Layout
 

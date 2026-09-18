@@ -19,7 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
-origin = ["python-pptx>=1.0", "pywin32"]
+reports = ["python-pptx>=1.0"]
+origin = ["python-pptx>=1.0", "pywin32; sys_platform == 'win32'"]
 
 [project.scripts]
 cyclediag = "cyclediag.__main__:main"

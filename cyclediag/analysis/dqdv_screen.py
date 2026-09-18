@@ -8,6 +8,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from cyclediag.features._statistics import finite_pearson
 from cyclediag.analysis.indicator_screen import (
     _health_column,
     _late_early_split,
@@ -138,9 +139,9 @@ def screen_dqdv_indicators(
             if np.isfinite(last):
                 height_fade_pct = (float(last) - float(b)) / abs(float(b)) * 100.0
 
-        corr_h = None
+        corr_h = np.nan
         if hcol and hcol in df.columns:
-            corr_h = s.corr(pd.to_numeric(df[hcol], errors="coerce"))
+            corr_h = finite_pearson(s, df[hcol])
 
         meta_rows.append({
             "leg": parsed["leg"],

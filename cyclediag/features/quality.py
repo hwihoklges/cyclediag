@@ -53,6 +53,14 @@ def cycle_quality_metrics(
         "temperature_available": False,
         "quality_score": None,
         "quality_gate_failed_groups": "",
+        "quality_evidence_coverage": 0.0,
+        "quality_status": "unknown",
+        "scientific_validity": {
+            "score_kind": "heuristic_data_quality_not_probability",
+            "warnings": ["voltage_window_and_quality_targets_require_protocol_validation",
+                         "voltage_span_not_per_leg_completeness",
+                         "dqdv_snr_is_voltage_span_noise_proxy"],
+        },
     }
     if cycle_df is None or cycle_df.empty or "voltage" not in cycle_df.columns:
         return out
@@ -69,7 +77,7 @@ def cycle_quality_metrics(
 
     if "temperature" in cycle_df.columns:
         t = pd.to_numeric(cycle_df["temperature"], errors="coerce")
-        out["temperature_available"] = bool((t.fillna(0).abs() > 1e-9).any())
+        out["temperature_available"] = bool(np.isfinite(t).any())
 
     lo, hi = expected_v_window
     if len(finite_v):
@@ -109,8 +117,10 @@ def cycle_quality_metrics(
             if a is not None:
                 dur = float(st[len(rest) - 1] - st[a]) if np.isfinite(st[-1]) and np.isfinite(st[a]) else 0.0
                 best = max(best, dur)
-            tau = tau_relax_est if tau_relax_est and tau_relax_est > 0 else 600.0
-            out["rest_sufficiency"] = best / tau
+            if tau_relax_est is not None and np.isfinite(tau_relax_est) and tau_relax_est > 0:
+                out["rest_sufficiency"] = best / tau_relax_est
+            else:
+                out["scientific_validity"]["warnings"].append("rest_sufficiency_requires_measured_tau")
 
     # simple SNR proxy: v span / noise
     if out["v_noise_sigma"] and out["v_noise_sigma"] > 0 and len(finite_v):
@@ -139,6 +149,8 @@ def cycle_quality_metrics(
             failed.append(name)
         score *= q ** w
         wsum += w
-    out["quality_score"] = float(score) if wsum > 0 else None
+    out["quality_score"] = float(score ** (1.0 / wsum)) if wsum > 0 else None
+    out["quality_evidence_coverage"] = wsum / sum(w for _, _, w in targets.values())
+    out["quality_status"] = "failed" if failed else "partial" if 0 < wsum < 1 else "assessed" if wsum else "unknown"
     out["quality_gate_failed_groups"] = ",".join(failed)
     return out

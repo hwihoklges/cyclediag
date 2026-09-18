@@ -15,7 +15,7 @@ import pandas as pd
 
 from cyclediag.models.indicator_scoring import filter_scoring_rows
 
-from .constraints import constraint_flags
+from .constraints import constraint_flags, scientific_validity
 from .pattern_scoring import load_mode_weights, score_all_modes_for_row
 from .schema import (
     DIAGNOSIS_MODEL_VERSION,
@@ -33,6 +33,8 @@ META_COLS = (
     "diagnosis_version",
     "diagnosis_constraints",
     "diagnosis_scored_row",
+    "diagnosis_status",
+    "scientific_validity",
 )
 
 
@@ -44,6 +46,8 @@ def diagnosis_wide_columns(modes: tuple[str, ...] = PATTERN_MODES) -> list[str]:
         cols.append(f"{mode}_supporting_features")
         cols.append(f"{mode}_conflicting_features")
         cols.append(f"{mode}_evidence_count")
+        cols.append(f"{mode}_evidence_coverage")
+        cols.append(f"{mode}_status")
     cols.extend(META_COLS)
     # Level-2 placeholders (null until validated models exist)
     cols.extend(["LLI_est", "LAM_PE_est", "LAM_NE_est", "electrode_slippage_est"])
@@ -63,6 +67,7 @@ def _baseline_row(grp: pd.DataFrame, baseline_cycle: int | None) -> dict[str, An
         hit = grp[grp["cycle"] == baseline_cycle]
         if not hit.empty:
             return hit.iloc[0].to_dict()
+        return {}  # An explicitly requested reference must not be fabricated.
     return grp.sort_values("cycle").iloc[0].to_dict()
 
 
@@ -79,7 +84,7 @@ def diagnose_feature_table(
     Does **not** require half-cell data. Level-2/3 estimate columns are left null.
 
     By default only routine (non-excluded) cycles are scored so RPT / DC-IR
-    spikes do not drive mode probabilities. Non-scored rows keep NaN scores and
+    spikes do not drive heuristic mode support. Non-scored rows keep NaN scores and
     ``diagnosis_scored_row=False``.
     """
     if table is None or table.empty:
@@ -96,11 +101,11 @@ def diagnose_feature_table(
     out = table.copy()
     n = len(out)
     for c in diagnosis_wide_columns(mode_list):
-        if c.endswith("_features") or c in (
+        if c.endswith(("_features", "_status")) or c in (
             "diagnosis_method", "diagnosis_model_version", "diagnosis_version",
-            "diagnosis_constraints",
+            "diagnosis_constraints", "scientific_validity",
         ):
-            out[c] = pd.Series([None] * n, dtype=object)
+            out[c] = pd.Series([None] * n, index=out.index, dtype=object)
         elif c in ("diagnosis_valid", "diagnosis_scored_row"):
             out[c] = False
         else:
@@ -109,9 +114,9 @@ def diagnose_feature_table(
     scored_pool = filter_scoring_rows(out, routine_only=routine_only)
     scored_idx = set(scored_pool.index)
 
-    group_cols = [c for c in ("cell_id", "file") if c in out.columns]
+    group_cols = [c for c in ("cell_id", "file", "source_file") if c in out.columns]
     if group_cols:
-        groups = list(out.groupby(group_cols, sort=False))
+        groups = list(out.groupby(group_cols, sort=False, dropna=False))
     else:
         groups = [(("__all__",), out)]
 
@@ -124,6 +129,8 @@ def diagnose_feature_table(
         for idx, row in grp.iterrows():
             row_dict = row.to_dict()
             cflags = constraint_flags(row_dict, cfg)
+            out.at[idx, "scientific_validity"] = scientific_validity(row_dict, cfg)
+            out.at[idx, "diagnosis_status"] = "unknown"
             out.at[idx, "diagnosis_constraints"] = ",".join(cflags) if cflags else ""
 
             if idx not in scored_idx:
@@ -154,6 +161,8 @@ def diagnose_feature_table(
                 out.at[idx, f"{mode}_supporting_features"] = ",".join(res.supporting_features)
                 out.at[idx, f"{mode}_conflicting_features"] = ",".join(res.conflicting_features)
                 out.at[idx, f"{mode}_evidence_count"] = res.evidence_count
+                out.at[idx, f"{mode}_evidence_coverage"] = res.evidence_coverage
+                out.at[idx, f"{mode}_status"] = res.status
                 qualities.append(res.data_quality_score)
                 valids.append(res.diagnosis_valid)
                 sidecar_rows.append({
@@ -165,7 +174,13 @@ def diagnose_feature_table(
                 })
 
             out.at[idx, "diagnosis_quality_score"] = float(np.nanmean(qualities)) if qualities else 0.0
+            validity = out.at[idx, "scientific_validity"]
+            validity["warnings"] = list(dict.fromkeys(
+                warning for result in results.values()
+                for warning in result.scientific_validity["warnings"]
+            ))
             out.at[idx, "diagnosis_valid"] = bool(any(valids))
+            out.at[idx, "diagnosis_status"] = "heuristic_support" if any(valids) else "unknown"
             out.at[idx, "diagnosis_scored_row"] = True
             out.at[idx, "diagnosis_method"] = str(cfg.get("diagnosis_method", "rule_pattern"))
             out.at[idx, "diagnosis_model_version"] = str(

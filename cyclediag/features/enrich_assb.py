@@ -175,7 +175,14 @@ def first_capa_baseline(features: pd.DataFrame, dcir_blocks: list[list[int]]) ->
 
 def _set_cell(out: pd.DataFrame, mask, col: str, val) -> None:
     if col not in out.columns:
-        out[col] = pd.Series([None] * len(out), dtype=object)
+        out[col] = pd.Series(None, index=out.index, dtype=object)
+    if isinstance(val, (dict, list)):
+        from copy import deepcopy
+
+        out[col] = out[col].astype(object)
+        for idx in out.index[mask]:
+            out.at[idx, col] = deepcopy(val)
+        return
     if out[col].dtype != object and not (
         isinstance(val, (int, float, np.floating, np.integer)) and not isinstance(val, (bool, np.bool_))
     ):
@@ -289,6 +296,8 @@ def enrich_feature_table(
                 expected_pulse_current=expected_pulse_current,
             )
             payload = result_to_dict(fit)
+            if "scientific_validity" in payload:
+                payload["ecm_scientific_validity"] = payload.pop("scientific_validity")
             mask = out["cycle"] == int(cyc)
             if soc is None:
                 for k, val in payload.items():
@@ -332,6 +341,7 @@ def enrich_feature_table(
         qm = cycle_quality_metrics(g, rest_current_max=rest_current_max)
         mask = out["cycle"] == int(cyc)
         for k, val in qm.items():
-            _set_cell(out, mask, k, val)
+            key = "quality_scientific_validity" if k == "scientific_validity" else k
+            _set_cell(out, mask, key, val)
 
     return out, meta

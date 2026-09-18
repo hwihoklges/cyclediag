@@ -162,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         from cyclediag.features.lges_catalog import FEATURE_SET_LGES
         from cyclediag.features.lges_extract import LgesExtractConfig, extract_lges_features_table
         from cyclediag.io.cycler_csv import ColumnMap, load_cycler_csv
+        from cyclediag.provenance import attach_provenance, build_provenance, save_features_csv
 
         cmap = (
             ColumnMap.studio_default()
@@ -169,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
             else ColumnMap.pne_default()
         )
         df = load_cycler_csv(args.input, column_map=cmap)
+        cfg = {"charge_step": args.charge_step, "discharge_step": args.discharge_step}
         if args.cv_only:
             table = extract_cv_regions_table(
                 df,
@@ -189,7 +191,16 @@ def main(argv: list[str] | None = None) -> int:
                 feature_set=args.feature_set,
             )
             table = extract_features_table(df, filepath=args.input, config=cfg)
-        _write_table(table, args.out)
+        provenance = build_provenance(args.input, df, config=cfg, column_map=cmap,
+                                      selectors={"entry_point": "cli_extract",
+                                                 "feature_set": args.feature_set, "cv_only": args.cv_only})
+        attach_provenance(table, df, provenance)
+        if Path(args.out).suffix.lower() == ".parquet":
+            if Path(args.out).resolve() == Path(args.input).resolve():
+                raise ValueError("Output must differ from input")
+            _write_table(table, args.out)
+        else:
+            save_features_csv(table, args.out, source_path=args.input)
         print(f"Wrote {len(table)} row(s) → {args.out}")
         return 0
 
@@ -216,7 +227,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         out = Path(args.out_dir)
         out.mkdir(parents=True, exist_ok=True)
-        _write_table(result["features"], str(out / "features.csv"))
+        from cyclediag.provenance import save_features_csv
+
+        export_features = result["features"].copy()
+        export_features.attrs["provenance"] = result["provenance"]
+        save_features_csv(export_features, out / "features.csv", source_path=args.input)
         _write_table(result["scored"], str(out / "diagnosis_scores.csv"))
         if not result["indicator_screen"].empty:
             _write_table(result["indicator_screen"], str(out / "indicator_screen.csv"))

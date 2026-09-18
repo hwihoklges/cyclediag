@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -34,6 +34,15 @@ class DcirFitResult:
     n_points: int = 0
     n_t_le_1s: int = 0
     flag: str = ""
+    scientific_validity: dict[str, Any] = field(default_factory=lambda: {
+        "model": "R_ohmic_plus_RC_plus_sqrt_time",
+        "causally_identified": False,
+        "validated_probability": False,
+        "warnings": ["components_are_equivalent_circuit_proxies_not_unique_mechanisms",
+                     "requires_stable_current_local_linearity_fixed_SOC_temperature",
+                     "sqrt_time_diffusion_is_finite_window_approximation",
+                     "fit_quality_does_not_validate_parameter_identifiability"],
+    })
 
 
 def _linreg(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
@@ -81,11 +90,22 @@ def fit_r_t_components(
     refine_global: bool = True,
 ) -> DcirFitResult:
     """Stepwise fit R(t) = RΩ + Rct(1-exp(-t/τ)) + A√t  [mΩ]."""
-    out = DcirFitResult(n_points=int(len(t)), n_t_le_1s=int(np.sum(t <= 1.0)))
     t = np.asarray(t, dtype=float)
     r = np.asarray(r_mohm, dtype=float)
+    if t.shape != r.shape or t.ndim != 1:
+        raise ValueError("t and r_mohm must be aligned one-dimensional traces")
     m = np.isfinite(t) & np.isfinite(r) & (t >= 0)
+    if i is not None:
+        i = np.asarray(i, dtype=float)
+        if i.shape != t.shape:
+            raise ValueError("current must align with time")
+        m &= np.isfinite(i)
+        i = i[m]
     t, r = t[m], r[m]
+    out = DcirFitResult(n_points=int(len(t)), n_t_le_1s=int(np.sum(t <= 1.0)))
+    if np.any(np.diff(t) <= 0) or np.any(r < 0):
+        out.flag = "invalid_time_or_negative_resistance"
+        return out
     if len(t) < 50:
         out.flag = "too_few_points"
         return out
@@ -110,7 +130,9 @@ def fit_r_t_components(
     late = (t >= 10.0) & (t <= 30.0)
     if late.sum() >= 5:
         a_diff, _ = _linreg(np.sqrt(t[late]), r[late])
-        out.A_diff = a_diff if np.isfinite(a_diff) and a_diff >= 0 else abs(a_diff) if np.isfinite(a_diff) else None
+        out.A_diff = a_diff if np.isfinite(a_diff) and a_diff >= 0 else None
+        if out.A_diff is None:
+            out.flag = (out.flag + "|negative_or_invalid_diffusion_slope").strip("|")
     else:
         out.A_diff = None
         out.flag = (out.flag + "|late_fail").strip("|")
@@ -206,6 +228,7 @@ def fit_r_t_components(
         and out.n_t_le_1s >= 8
         and ramp_ok
         and "sampling_too_sparse" not in out.flag
+        and not any(tag in out.flag for tag in ("fallback", "fail", "degenerate", "invalid_diffusion"))
     )
     return out
 

@@ -1,0 +1,55 @@
+name: cyclediag-integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_integration:
+        description: "Download only M01Ch022 raw fixture and run presentation integration"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  presentation:
+    if: ${{ inputs.run_integration }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GIT_LFS_SKIP_SMUDGE: "1"
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          python -m pip install -c constraints/py314.txt -r requirements.txt -e "./cyclediag[dev,reports]"
+      - run: python -m pip freeze > resolved-dependencies.txt
+      - name: Fetch the single required fixture (never all LFS)
+        run: |
+          git lfs install --local
+          git lfs pull --include="example/fixtures/doe/DOE1/set4_SJ900/M01Ch022_raw.csv" --exclude=""
+          python -c "from pathlib import Path; p=Path('example/fixtures/doe/DOE1/set4_SJ900/M01Ch022_raw.csv'); assert p.stat().st_size > 1024; assert not p.open('rb').read(100).startswith(b'version https://git-lfs.github.com/spec/v1')"
+      - name: Integration presentation
+        run: |
+          python -m cyclediag.tools.run_sohq_bp_presentation --cells M01Ch022 --step 40 --out example/output/sohq_bp_presentation
+          python -c "from pathlib import Path; p=Path('example/output/sohq_bp_presentation'); assert list(p.rglob('*.png')) and list(p.rglob('*.csv')), 'Expected figures and tables'"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m01ch022-presentation
+          path: |
+            example/output/sohq_bp_presentation/
+            resolved-dependencies.txt
+          retention-days: 14

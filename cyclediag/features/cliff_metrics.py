@@ -37,8 +37,9 @@ def compute_cliff_metrics(
     ---------
     1. ``compute_dvdq`` on absolute cumulative discharge Q.
     2. Threshold = ``thr_factor`` × median |dV/dQ| in mid-Q band (40–60 % of Qmax).
-    3. Forward scan in rear half (Q ≥ 0.5·Qmax): first sustained |dV/dQ| ≥ thr.
-    4. Continuity: at least ``min_continuous`` consecutive points above thr.
+     3. Primary: strongest curvature peak in the interior 20–92 % capacity band.
+     4. Secondary: first sustained |dV/dQ| ≥ thr in the rear 45–92 % band,
+         for at least ``min_continuous`` consecutive points.
     5. Fallback: argmax |dV/dQ| in [0.15·Qmax, 0.92·Qmax] (excludes final spike only).
 
     Returns
@@ -88,10 +89,10 @@ def compute_cliff_metrics(
     thr = med * thr_factor
     empty["cliff_thr_used"] = thr
 
-    # Primary: |d(dV/dQ)/dQ| local maxima before final depletion — prefer Q ≤ 70 % Qmax
+    # Primary: strongest interior curvature before final depletion. A fixed
+    # 70 % preference can select roundoff when the transition moves later.
     dmag = np.abs(np.gradient(mag, qx))
     q_cut_hi = qmax - 0.08 * max(qmax - qmin, 1e-9)
-    q_pref_hi = qmin + 0.70 * (qmax - qmin)
     band = (
         (qx >= qmin + 0.20 * (qmax - qmin))
         & (qx <= q_cut_hi)
@@ -110,9 +111,7 @@ def compute_cliff_metrics(
             if dmag[gi] >= left and dmag[gi] >= right:
                 local_peaks.append(int(gi))
         candidates = local_peaks or [int(idx_band[int(np.nanargmax(dmag[band]))])]
-        preferred = [i for i in candidates if qx[i] <= q_pref_hi]
-        pool = preferred if preferred else candidates
-        cliff_idx = max(pool, key=lambda i: dmag[i])
+        cliff_idx = max(candidates, key=lambda i: dmag[i])
 
     q_rear_lo = qmin + 0.45 * (qmax - qmin)
     q_rear_hi = qmax - 0.08 * max(qmax - qmin, 1e-9)

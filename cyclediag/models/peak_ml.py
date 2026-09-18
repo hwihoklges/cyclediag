@@ -215,14 +215,19 @@ def predict_peak_model(
     for c in missing:
         out[c] = np.nan
 
-    x = out[feat_cols].to_numpy(dtype=float)
+    x = out[feat_cols].to_numpy(dtype=float, copy=True)
+    x[~np.isfinite(x)] = np.nan
     valid = np.isfinite(x).any(axis=1)
     raw = np.full(len(out), np.nan, dtype=float)
     if valid.any():
         raw[valid] = _raw_scores(bundle.pipeline, x[valid])
 
     out["ml_raw_score"] = raw
-    out["ml_anomaly_score"] = _normalize_scores(np.nan_to_num(raw, nan=np.nanmedian(raw[valid]) if valid.any() else 0.0))
+    normalized = np.full(len(out), np.nan)
+    if valid.any():
+        normalized[valid] = _normalize_scores(raw[valid])
+    out["ml_anomaly_score"] = normalized
+    out["ml_evidence_coverage"] = np.isfinite(x).mean(axis=1)
 
     watch = bundle.score_thresholds.get("watch", np.nan)
     alert = bundle.score_thresholds.get("alert", np.nan)
@@ -238,10 +243,11 @@ def predict_peak_model(
             flags.append("ok")
     out["ml_flag"] = flags
     out["ml_is_outlier"] = out["ml_flag"].isin(["watch", "alert"])
-    if bundle.train_cycles and "cycle" in out.columns:
-        ref_mask = out["cycle"].isin(bundle.train_cycles)
-        out.loc[ref_mask, "ml_flag"] = "reference"
-        out.loc[ref_mask, "ml_is_outlier"] = False
+    # v1 bundles store cycle numbers, not source/cell identity. A number match is
+    # not reference membership, and must never suppress an alert or unknown.
+    out["ml_reference_membership"] = "unknown_legacy_cycle_only"
+    out["ml_train_cycle_number_match"] = out["cycle"].isin(bundle.train_cycles) if "cycle" in out else False
+    out["ml_score_kind"] = "heuristic_anomaly_not_probability"
     return out
 
 

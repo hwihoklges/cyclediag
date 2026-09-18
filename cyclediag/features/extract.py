@@ -19,6 +19,7 @@ FEATURE_SETS = (FEATURE_SET, FEATURE_SET_LGES)
 
 @dataclass
 class FeatureConfig:
+    """Logical input units: A, Ah, V, s; f_Q_spec is mAh/g of active_mass_g."""
     charge_step: str = "charge"
     discharge_step: str = "discharge"
     active_mass_g: float | None = None
@@ -34,12 +35,12 @@ def _capacity_weighted_v_avg(seg: pd.DataFrame) -> float | None:
     v = pd.to_numeric(seg["voltage"], errors="coerce").to_numpy(dtype=float)
     q = pd.to_numeric(seg["capacity"], errors="coerce").to_numpy(dtype=float)
     valid = np.isfinite(v) & np.isfinite(q)
-    if valid.sum() < 2:
-        return float(v[valid][0]) if valid.any() else None
-    v, q = v[valid], q[valid]
+    # Do not bridge missing samples or integrate across a counter reset.
+    if len(q) < 2 or not valid.all():
+        return None
     dq = np.diff(q)
-    if not np.any(dq > 0):
-        return float(np.mean(v))
+    if np.any(dq < 0) or not np.any(dq > 0):
+        return None
     v_mid = (v[:-1] + v[1:]) / 2.0
     return float(np.sum(v_mid * dq) / np.sum(dq))
 
@@ -50,27 +51,45 @@ def extract_leg_features(seg: pd.DataFrame, *, leg: str, config: FeatureConfig) 
     if seg is None or seg.empty:
         return row
 
-    v = pd.to_numeric(seg.get("voltage"), errors="coerce")
-    q = pd.to_numeric(seg.get("capacity"), errors="coerce")
-    q_max = float(q.max()) if q.notna().any() else None
+    seg = seg.copy()
+    q_col = f"{leg}_capacity"
+    if q_col not in seg.columns:
+        q_col = "capacity"
+    # One leg-specific series is shared by total capacity, weighted V and CC/CV.
+    seg["capacity"] = pd.to_numeric(
+        seg.get(q_col, pd.Series(np.nan, index=seg.index)), errors="coerce",
+    )
+    v = pd.to_numeric(seg.get("voltage", pd.Series(np.nan, index=seg.index)), errors="coerce")
+    q = seg["capacity"]
+    q_valid = bool(np.isfinite(q).all() and (q >= 0).all() and not (q.diff() < 0).any())
+    row["capacity_status"] = "ok" if q_valid else "invalid_or_reset_counter"
+    row["capacity_column"] = q_col
+    row["unit_warnings"] = list(seg.attrs.get("unit_warnings", []))
+    row["feature_units"] = {"f_Q_max": "Ah", "f_Q_spec": "mAh/g", "f_V_avg": "V"}
+    q_max = float(q.max()) if q_valid else None
     row["f_Q_max"] = q_max
     if config.active_mass_g and q_max is not None and config.active_mass_g > 0:
-        row["f_Q_spec"] = q_max / config.active_mass_g
+        row["f_Q_spec"] = 1000.0 * q_max / config.active_mass_g
     else:
         row["f_Q_spec"] = None
 
     if v.notna().any():
-        row["f_V_start"] = float(v.iloc[0])
-        row["f_V_end"] = float(v.iloc[-1])
+        row["f_V_start"] = float(v.iloc[0]) if np.isfinite(v.iloc[0]) else None
+        row["f_V_end"] = float(v.iloc[-1]) if np.isfinite(v.iloc[-1]) else None
     else:
         row["f_V_start"] = row["f_V_end"] = None
     row["f_V_avg"] = _capacity_weighted_v_avg(seg)
+    if not q_valid:
+        row.update(f_cc_Q_frac=None, f_cv_time_s=None, f_v_cc_end=None,
+                   f_q_cc_end=None, has_cv=None, cv_method="invalid_capacity")
+        return row
 
     cv = detect_cv_region(
         seg,
         v_col="voltage",
         q_col="capacity" if "capacity" in seg.columns else None,
         t_col="time" if "time" in seg.columns else None,
+        current_col="current" if "current" in seg.columns else None,
     )
     row["f_cc_Q_frac"] = cv.cc_q_frac
     row["f_cv_time_s"] = cv.cv_time_s

@@ -58,15 +58,13 @@ def dvdq_intensity_soc_band(
 def capacity_weighted_v_avg(v: np.ndarray, q: np.ndarray) -> float | None:
     v = np.asarray(v, dtype=float)
     q = np.asarray(q, dtype=float)
-    mask = np.isfinite(v) & np.isfinite(q)
-    v, q = v[mask], q[mask]
-    if len(v) < 2:
+    if v.shape != q.shape or v.ndim != 1 or len(v) < 2:
         return None
-    order = np.argsort(q)
-    q, v = q[order], v[order]
+    if not (np.isfinite(v).all() and np.isfinite(q).all()):
+        return None
     dq = np.diff(q)
-    if not np.any(np.abs(dq) > 0):
-        return float(np.nanmean(v))
+    if np.any(dq < 0) or not np.any(dq > 0):
+        return None
     # trapezoid weights on midpoints
     v_mid = 0.5 * (v[1:] + v[:-1])
     w = np.abs(dq)
@@ -76,18 +74,14 @@ def capacity_weighted_v_avg(v: np.ndarray, q: np.ndarray) -> float | None:
     return float(np.sum(v_mid * w) / s)
 
 
-def energy_wh(v: np.ndarray, q: np.ndarray, *, q_is_mah: bool = True) -> float | None:
-    """∫ V dQ. If q in mAh → result in mWh; if Ah → Wh."""
+def energy_wh(v: np.ndarray, q: np.ndarray, *, q_is_mah: bool = False) -> float | None:
+    """Return Wh from a finite monotonic leg counter (default Ah; explicit mAh)."""
     v = np.asarray(v, dtype=float)
     q = np.asarray(q, dtype=float)
-    mask = np.isfinite(v) & np.isfinite(q)
-    v, q = v[mask], q[mask]
-    if len(v) < 2:
+    if capacity_weighted_v_avg(v, q) is None:
         return None
-    order = np.argsort(q)
-    q, v = q[order], v[order]
     e = float(np.trapezoid(v, q) if hasattr(np, "trapezoid") else np.trapz(v, q))
-    return abs(e)
+    return e / 1000.0 if q_is_mah else e
 
 
 def ir_drop_proxy(seg: pd.DataFrame, *, n_points: int = 5) -> float | None:
