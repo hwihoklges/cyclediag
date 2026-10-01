@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -18,7 +18,6 @@ from .dqdv_peaks import (
     peaks_to_columns,
 )
 from .lges_extra_indicators import (
-    correct_r_to_25c,
     dtw_distance,
     extract_absolute_dvdq_indicators,
     extract_shape_indicators,
@@ -39,6 +38,10 @@ from .lges_catalog import (
 from .band_capacity import BandCapacityConfig, discharge_band_capacity
 from .cell_meta import CellProtocolMeta, DEFAULT_Q_RATED_AH
 from .segment_utils import iter_rest_periods, leg_segment
+from .measurement_contracts import (
+    TemperatureCalibration, MeasurementTemperature, calibrated_resistance,
+    VE_SEMANTICS, feature_semantics_match,
+)
 from .cc_cv import resolve_current_column
 from .signal_cv import detect_cv_signal, signal_cv_to_row
 from .units import capacity_to_ah, canonical_unit_factor
@@ -63,6 +66,9 @@ class LgesExtractConfig(FeatureConfig):
     dcir_c_rate: float = 1.0
     band_capacity: BandCapacityConfig | None = None
     capacity_unit: str | None = None  # "ah" | "mah" | None (header-driven)
+    temperature_calibrations: dict[str, TemperatureCalibration] = field(default_factory=dict)
+    # Cycle -> raw resistance feature -> independently specified measurement temperature.
+    measurement_temperatures: dict[str, dict[str, MeasurementTemperature]] = field(default_factory=dict)
 
     def protocol_meta(self) -> CellProtocolMeta:
         return CellProtocolMeta(
@@ -121,7 +127,7 @@ def _leg_capacity_ah(seg: pd.DataFrame, leg: str, *, unit: str | None = None) ->
     return None
 
 
-def _capacity_series(seg: pd.DataFrame, leg: str) -> np.ndarray | None:
+def _capacity_series(seg: pd.DataFrame, leg: str, *, validate: bool = True) -> np.ndarray | None:
     if seg is None or seg.empty:
         return None
     col = "charge_capacity" if leg == "charge" else "discharge_capacity"
@@ -130,6 +136,8 @@ def _capacity_series(seg: pd.DataFrame, leg: str) -> np.ndarray | None:
     if col not in seg.columns:
         return None
     q = pd.to_numeric(seg[col], errors="coerce").to_numpy(dtype=float)
+    if not validate:
+        return q
     return q if np.isfinite(q).all() and np.all(q >= 0) and not np.any(np.diff(q) < 0) else None
 
 
@@ -317,6 +325,20 @@ def extract_lges_cycle_row(
     row["unit_warnings"] = list(df.attrs.get("unit_warnings", []))
     row["feature_units"] = {"chgCapa": "Ah", "dchgCapa": "Ah", "chg_E": "Wh",
                             "dchg_E": "Wh", "CE": "percent", "VE": "fraction", "EE": "fraction"}
+    row["feature_semantics"] = {
+        "schema": "lges_measurements_v2", "VE": VE_SEMANTICS,
+        "VE_observed": VE_SEMANTICS, "EE": VE_SEMANTICS,
+        "CE": "legacy_counter_max_percent", "chgCapa": "legacy_counter_max",
+        "dchgCapa": "legacy_counter_max", "hysteresis": "endpoint_SOC_proxy_v2",
+        "chg_V_avg": VE_SEMANTICS, "dchg_V_avg": VE_SEMANTICS,
+        "chg_E": VE_SEMANTICS, "dchg_E": VE_SEMANTICS,
+        "hyst_area": "endpoint_SOC_proxy_v2", "hyst_max_dV": "endpoint_SOC_proxy_v2",
+        "CE_observed": "observed_window_percent_v2", "EE_observed": VE_SEMANTICS,
+    }
+    for prefix in ("chg", "dchg"):
+        row["feature_units"].update({f"{prefix}Capa_observed": "Ah",
+            f"{prefix}_E_observed": "Wh", f"{prefix}_V_avg_observed": "V"})
+    row["feature_units"].update(CE_observed="percent", VE_observed="fraction", EE_observed="fraction")
 
     temp_col = _resolve_temperature_col(raw_df if raw_df is not None else cycle_df, cfg.temperature_col)
     seg_kw = dict(
@@ -379,8 +401,15 @@ def extract_lges_cycle_row(
 
     row["EoC_dchgR_10_60_ratio"] = safe_ratio(row.get("EoC_dchgR_10s"), row.get("EoC_dchgR_60s"))
     row["EoD_chgR_10_60_ratio"] = safe_ratio(row.get("EoD_chgR_10s"), row.get("EoD_chgR_60s"))
-    row["EoC_dchgR_10s_T25"] = correct_r_to_25c(row.get("EoC_dchgR_10s"), row.get("dchg_temp_avg"))
-    row["EoD_chgR_10s_T25"] = correct_r_to_25c(row.get("EoD_chgR_10s"), row.get("chg_temp_avg"))
+    row["temperature_correction"] = {}
+    measurements = cfg.measurement_temperatures.get(str(cycle), {})
+    for feature in ("EoC_dchgR_10s", "EoD_chgR_10s"):
+        calibration = cfg.temperature_calibrations.get(feature)
+        value, meta = calibrated_resistance(row.get(feature), calibration, measurements.get(feature))
+        row[f"{feature}_Tref"] = value
+        # Preserve the old key's literal temperature meaning, never mislabel Tref.
+        row[f"{feature}_T25"] = value if calibration is not None and getattr(calibration, "reference_c", None) == 25.0 else None
+        row["temperature_correction"][feature] = meta
 
     cap_unit = "ah"  # All capacity columns converted together above or by IO.
     chg_ah = _leg_capacity_ah(chg, "charge", unit=cap_unit)
@@ -427,7 +456,8 @@ def extract_lges_cycle_row(
     # SOC bands, V_avg, energy, hysteresis, plateau, IC area, IR proxy, cliff/margin
     row.update(
         extract_shape_indicators(
-            chg, dchg, chg_q, dchg_q,
+            chg, dchg, _capacity_series(chg, "charge", validate=False),
+            _capacity_series(dchg, "discharge", validate=False),
             config=dqdv_cfg,
             dchg_v_cutoff=row.get("dchg_V_cutoff"),
         )
@@ -448,14 +478,15 @@ def extract_lges_cycle_row(
     if e_chg and e_dchg and e_chg > 0:
         row["EE"] = float(e_dchg) / float(e_chg)
         row["dE"] = float(e_chg) - float(e_dchg)
-        if ce and ce > 0:
-            row["VE"] = row["EE"] / (float(ce) / 100.0)
-        else:
-            row["VE"] = None
+        row["VE"] = safe_ratio(row.get("dchg_V_avg_observed"), row.get("chg_V_avg_observed"))
     else:
         row["EE"] = None
         row["VE"] = None
         row["dE"] = None
+    row["VE_observed"] = row["VE"]
+    row["EE_observed"] = row["EE"]
+    ce_obs = safe_ratio(row.get("dchgCapa_observed"), row.get("chgCapa_observed"))
+    row["CE_observed"] = ce_obs * 100.0 if ce_obs is not None else None
     # cycle duration for CI_per_hour
     dur_h = None
     if "time" in cycle_df.columns:
@@ -508,6 +539,7 @@ def apply_lges_delta_features(table: pd.DataFrame, *, baseline_cycle: int = 1) -
 
     for col in DELTA_ABS_COLS:
         out[f"delta_{col}"] = None
+    out["baseline_semantics"] = pd.Series([None] * len(out), index=out.index, dtype=object)
     for col in DELTA_PCT_COLS:
         out[f"{col}_inc"] = None
     out["delta_chgCapa_CCratio"] = None
@@ -528,6 +560,11 @@ def apply_lges_delta_features(table: pd.DataFrame, *, baseline_cycle: int = 1) -
         if base_rows.empty:
             base_rows = grp.sort_values("cycle").head(1)
         base = base_rows.iloc[0]
+        for i in idx:
+            out.at[i, "baseline_semantics"] = {
+                "cycle": int(base["cycle"]), "requested_cycle": int(baseline_cycle),
+                "feature_semantics": base.get("feature_semantics") if isinstance(base.get("feature_semantics"), dict) else None,
+            }
 
         dchg_base = base.get("dchgCapa")
         if dchg_base and np.isfinite(dchg_base) and dchg_base > 0:
@@ -537,7 +574,12 @@ def apply_lges_delta_features(table: pd.DataFrame, *, baseline_cycle: int = 1) -
             b = base.get(col)
             if b is None or not np.isfinite(b):
                 continue
-            out.loc[idx, f"delta_{col}"] = grp[col] - b
+            if col in {"chg_V_avg", "dchg_V_avg", "hyst_area", "hyst_max_dV"}:
+                for i, current in grp.iterrows():
+                    if int(base["cycle"]) == int(baseline_cycle) and feature_semantics_match(current, base, col):
+                        out.at[i, f"delta_{col}"] = safe_diff(current.get(col), b)
+            else:
+                out.loc[idx, f"delta_{col}"] = grp[col] - b
 
         if base.get("chgCapa_CCratio") is not None and np.isfinite(base.get("chgCapa_CCratio")):
             out.loc[idx, "delta_chgCapa_CCratio"] = (
@@ -646,6 +688,10 @@ def extract_lges_features_table(
             rest_current_max=cfg.resolved_rest_current_max(),
             expected_pulse_current=cfg.resolved_pulse_current(),
             protocol_meta=cfg.protocol_meta(),
+            pulse_threshold_explicit=cfg.expected_pulse_current is not None,
+            pulse_threshold_assumed=(cfg.expected_pulse_current is None
+                                     and cfg.q_rated_ah == DEFAULT_Q_RATED_AH
+                                     and cfg.dcir_c_rate == 1.0),
         )
         if cfg.auto_baseline and enrich_meta.get("baseline_cycle_auto"):
             cfg.baseline_cycle = int(enrich_meta["baseline_cycle_auto"])

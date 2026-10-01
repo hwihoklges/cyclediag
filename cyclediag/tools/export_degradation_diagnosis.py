@@ -94,8 +94,10 @@ def main() -> None:
             ["cell_id", "tagged_cycle", "cycle", "SoHQ"]
             + [score_column_name(m) for m in PATTERN_MODES]
             + [confidence_column_name(m) for m in PATTERN_MODES]
+            + [c for c in features.columns if c.endswith(("_scientific_eligible", "_eligibility_reasons"))]
             + [
                 "diagnosis_quality_score", "diagnosis_valid",
+                "diagnosis_heuristic_support_valid", "diagnosis_status", "scientific_validity",
                 "diagnosis_method", "diagnosis_model_version", "diagnosis_version",
             ]
         )

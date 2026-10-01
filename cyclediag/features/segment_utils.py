@@ -99,7 +99,10 @@ def leg_segment(
         rest_current_max=rest_current_max,
     )
     mask = [k == leg for k in kinds]
-    return cycle_df.loc[mask].copy()
+    result = cycle_df.loc[mask].copy()
+    positions = np.flatnonzero(mask)
+    result.attrs["acquisition_disjoint"] = bool(np.any(np.diff(positions) != 1))
+    return result
 
 
 def iter_rest_periods(

@@ -12,9 +12,7 @@ from cyclediag.features.dqdv_peaks import (
     dvdq_intensity_at_soc,
 )
 
-_RGAS = 8.314  # J/mol/K
-_EA_DEFAULT = 20_000.0  # J/mol — mild kinetic correction
-_TREF = 298.15  # 25 °C
+from .measurement_contracts import paired_counter, temp_correct_ir, observed_leg
 
 
 def dvdq_intensity_soc_band(
@@ -56,11 +54,8 @@ def dvdq_intensity_soc_band(
 
 
 def capacity_weighted_v_avg(v: np.ndarray, q: np.ndarray) -> float | None:
-    v = np.asarray(v, dtype=float)
-    q = np.asarray(q, dtype=float)
-    if v.shape != q.shape or v.ndim != 1 or len(v) < 2:
-        return None
-    if not (np.isfinite(v).all() and np.isfinite(q).all()):
+    q, v, reason = paired_counter(q, v)
+    if reason:
         return None
     dq = np.diff(q)
     if np.any(dq < 0) or not np.any(dq > 0):
@@ -106,7 +101,7 @@ def hysteresis_metrics(
     *,
     n_grid: int = 500,
 ) -> dict:
-    """Charge vs discharge V(Q_norm) loop area, max ΔV, and SOC-band areas (§5.11)."""
+    """Loaded-voltage gap on endpoint SOC proxy, not verified SOC/equilibrium."""
     empty = {
         "hyst_area": None,
         "hyst_max_dV": None,
@@ -120,37 +115,37 @@ def hysteresis_metrics(
         "hyst_max_dV_high": None,
     }
 
-    def _norm_vq(q, v):
-        q = np.asarray(q, dtype=float)
-        v = np.asarray(v, dtype=float)
-        m = np.isfinite(q) & np.isfinite(v)
-        q, v = q[m], v[m]
-        if len(q) < 5:
-            return None, None
-        order = np.argsort(q)
-        q, v = q[order], v[order]
-        qmin, qmax = float(q[0]), float(q[-1])
-        if qmax <= qmin:
-            return None, None
-        qn = (q - qmin) / (qmax - qmin)
-        _, uid = np.unique(qn, return_index=True)
-        return qn[uid], v[uid]
-
-    qc, vc = _norm_vq(chg_q, chg_v)
-    qd, vd = _norm_vq(dchg_q, dchg_v)
-    if qc is None or qd is None:
+    meta = {"status": "unknown", "reason": None,
+            "coordinate": "endpoint_normalized_SOC_proxy", "area_unit": "V",
+            "physical_SOC_verified": False, "equilibrium_verified": False,
+            "window": [0.02, 0.98], "version": 2}
+    empty["hysteresis_metadata"] = meta
+    qc, vc, rc = paired_counter(chg_q, chg_v)
+    qd, vd, rd = paired_counter(dchg_q, dchg_v)
+    if rc or rd:
+        meta["reason"] = {"charge": rc, "discharge": rd}
         return empty
-    # trim ends 2% per roadmap
-    grid = np.linspace(0.02, 0.98, n_grid)
+    qc = (qc - qc[0]) / (qc[-1] - qc[0])
+    qd = (1.0 - (qd - qd[0]) / (qd[-1] - qd[0]))[::-1]
+    vd = vd[::-1]
+    # Include knots and exact clipped band boundaries (piecewise-linear integral).
+    grid = np.unique(np.r_[np.linspace(0.02, 0.98, max(2, n_grid)), qc, qd, 0.2, 0.8])
+    grid = grid[(grid >= 0.02) & (grid <= 0.98)]
     try:
         vc_i = np.interp(grid, qc, vc)
         vd_i = np.interp(grid, qd, vd)
     except Exception:
         return empty
     dv = vc_i - vd_i
+    # Absolute area needs zero-crossings as well as profile knots.
+    cross = np.flatnonzero(dv[:-1] * dv[1:] < 0)
+    zeros = grid[cross] - dv[cross] * np.diff(grid)[cross] / np.diff(dv)[cross]
+    grid = np.unique(np.r_[grid, zeros])
+    dv = np.interp(grid, qc, vc) - np.interp(grid, qd, vd)
     trap = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
     area = float(trap(np.abs(dv), grid))
     out = {
+        "hysteresis_metadata": dict(meta, status="ok"),
         "hyst_area": area,
         "hyst_max_dV": float(np.nanmax(np.abs(dv))),
         "hyst_area_low": None,
@@ -165,7 +160,7 @@ def hysteresis_metrics(
     bands = {"low": (0.00, 0.20), "mid": (0.20, 0.80), "high": (0.80, 1.00)}
     for name, (a, b) in bands.items():
         m = (grid >= a) & (grid <= b)
-        if m.sum() < 3:
+        if m.sum() < 2:
             continue
         g, d = grid[m], dv[m]
         out[f"hyst_area_{name}"] = float(trap(np.abs(d), g))
@@ -246,16 +241,9 @@ def dqdv_area_sum(
     )
 
 
-def correct_r_to_25c(r_mohm: float | None, temp_c: float | None, *, ea: float = _EA_DEFAULT) -> float | None:
-    """Arrhenius map R(T) → equivalent at 25 °C."""
-    if r_mohm is None or temp_c is None:
-        return None
-    if not np.isfinite(r_mohm) or not np.isfinite(temp_c):
-        return None
-    t_k = float(temp_c) + 273.15
-    if t_k <= 0:
-        return None
-    return float(r_mohm * np.exp(-ea / _RGAS * (1.0 / t_k - 1.0 / _TREF)))
+def correct_r_to_25c(r_mohm: float | None, temp_c: float | None, *, ea: float | None = None) -> float | None:
+    """Pure transform with explicit Ea only; extraction requires calibration."""
+    return temp_correct_ir(r_mohm, temp_c, 25.0, ea)
 
 
 def safe_ratio(a: float | None, b: float | None) -> float | None:
@@ -515,6 +503,7 @@ def extract_shape_indicators(
 ) -> dict:
     """Bundle of Tier1/2 shape indicators for one cycle."""
     out: dict = {}
+    raw_chg_q, raw_dchg_q = chg_q, dchg_q
     chg_v = (
         pd.to_numeric(chg["voltage"], errors="coerce").to_numpy(dtype=float)
         if chg is not None and not chg.empty and "voltage" in chg.columns
@@ -526,6 +515,11 @@ def extract_shape_indicators(
         else None
     )
 
+    # Derivative/peak helpers remain separate; don't pass rejected counters to them.
+    if paired_counter(chg_q, chg_v)[2]:
+        chg_q = None
+    if paired_counter(dchg_q, dchg_v)[2]:
+        dchg_q = None
     if chg_q is not None and chg_v is not None:
         out["chg_V_avg"] = capacity_weighted_v_avg(chg_v, chg_q)
         out["chg_E"] = energy_wh(chg_v, chg_q)
@@ -584,11 +578,19 @@ def extract_shape_indicators(
         else:
             out["dchg_V_cutoff_margin"] = None
 
-    if (
-        chg_q is not None and dchg_q is not None
-        and chg_v is not None and dchg_v is not None
-    ):
-        hyst = hysteresis_metrics(chg_q, chg_v, dchg_q, dchg_v)
-        out.update(hyst)
-
+    observed = {}
+    for prefix, leg, seg, q in (("chg", "charge", chg, raw_chg_q), ("dchg", "discharge", dchg, raw_dchg_q)):
+        dq, e, avg, meta = observed_leg(seg, q)
+        observed[leg] = meta
+        out[f"{prefix}Capa_observed"] = dq
+        out[f"{prefix}_E_observed"] = out[f"{prefix}_E"] = e
+        out[f"{prefix}_V_avg_observed"] = out[f"{prefix}_V_avg"] = avg
+    out["observed_window"] = observed
+    hyst = hysteresis_metrics(raw_chg_q, chg_v, raw_dchg_q, dchg_v)
+    if any(m["status"] != "ok" for m in observed.values()):
+        for key in hyst:
+            if key.startswith("hyst_"):
+                hyst[key] = None
+        hyst["hysteresis_metadata"].update(status="unknown", reason={k: m["reason"] for k, m in observed.items()})
+    out.update(hyst)
     return out

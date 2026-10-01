@@ -1,7 +1,8 @@
 {
   "diagnosis_version": "fullcell_v1",
   "diagnosis_method": "rule_pattern",
-  "diagnosis_model_version": "pattern_rule_v1",
+  "diagnosis_model_version": "pattern_rule_v2_semantics",
+  "feature_semantics_required": {"VE": "observed_window_v2"},
   "chemistry": "Liion_NMC_Gr",
   "support_threshold": 0.25,
   "conflict_threshold": 0.25,
@@ -15,6 +16,10 @@
   "modes": {
     "LLI": {
       "description": "Loss of Lithium Inventory — window shift / endpoint early arrival",
+      "eligibility": {"required_groups": [
+        {"name": "endpoint_shift", "any_of": ["delta_dchg_V_cutoff_margin", "delta_EoD_restV_end", "ocv_parallel_shift", "delta_EoC_restV_end"], "quality_metrics": ["leg_completeness"]},
+        {"name": "independent_shape_or_efficiency", "any_of": ["delta_dchg_dVdQ_SOC0", "delta_dchg_dQdV_peak1_V", "delta_chg_dQdV_peak1_V", "VE"], "quality_metrics": ["samples_per_mV"]}
+      ]},
       "evidence": [
         {"feature": "delta_dchg_V_cutoff_margin", "direction": "decrease", "weight": 1.2, "scale": 0.05},
         {"feature": "delta_EoD_restV_end", "direction": "increase", "weight": 1.0, "scale": 0.05},
@@ -32,6 +37,10 @@
     },
     "LAM_PE": {
       "description": "Positive electrode active material loss — area/plateau shrink",
+      "eligibility": {"required_groups": [
+        {"name": "plateau", "any_of": ["delta_dchg_plateau_V", "dchg_plateau_width"], "quality_metrics": ["leg_completeness"]},
+        {"name": "positive_electrode_shape", "any_of": ["delta_chg_dQdV_peak1_V", "chg_dVdQ_SOC100"], "quality_metrics": ["dqdv_snr"]}
+      ]},
       "evidence": [
         {"feature": "delta_dchg_plateau_V", "direction": "either", "weight": 0.8, "scale": 0.02},
         {"feature": "dchg_plateau_width", "direction": "decrease_vs_baseline", "weight": 1.0, "scale": 2.0, "baseline_ref": "dchg_plateau_width"},
@@ -44,6 +53,10 @@
     },
     "LAM_NE": {
       "description": "Negative electrode active material loss — absolute-Ah cliff / charge accept",
+      "eligibility": {"required_groups": [
+        {"name": "negative_electrode_cliff", "any_of": ["delta_dchg_dVdQ_SOC0", "dchg_dVdQ_SOC0_cliff_width_abs", "dchg_Q_cliff_abs"], "quality_metrics": ["dqdv_snr"]},
+        {"name": "capacity_or_charge_acceptance", "any_of": ["delta_dchg_V_cutoff_margin", "chgCVtime", "EoD_chgR_10s_inc"], "quality_metrics": ["leg_completeness"]}
+      ]},
       "evidence": [
         {"feature": "delta_dchg_dVdQ_SOC0", "direction": "increase", "weight": 1.2, "scale": 5.0},
         {"feature": "dchg_dVdQ_SOC0_to_mid_ratio", "direction": "increase", "weight": 1.0, "scale": 1.0},
@@ -62,6 +75,10 @@
     },
     "impedance": {
       "description": "Ohmic / kinetic resistance growth",
+      "eligibility": {"required_groups": [
+        {"name": "pulse_resistance", "any_of": ["EoC_dchgR_10s_inc", "EoD_chgR_10s_inc"], "quality_metrics": ["pulse_sample_count_1s", "pulse_current_stability"]},
+        {"name": "time_scale", "any_of": ["EoC_dchgR_60s_inc", "EoD_chgR_60s_inc", "EoC_dchgR_10_60_ratio"], "quality_metrics": ["pulse_current_stability"]}
+      ]},
       "evidence": [
         {"feature": "EoC_dchgR_10s_inc", "direction": "increase", "weight": 1.2, "scale": 20.0},
         {"feature": "EoC_dchgR_60s_inc", "direction": "increase", "weight": 1.0, "scale": 20.0},
@@ -75,6 +92,10 @@
     },
     "transport": {
       "description": "Polarization / diffusion / transport limitation",
+      "eligibility": {"required_groups": [
+        {"name": "relaxation", "any_of": ["EoC_restV_tau", "EoD_restV_tau", "EoC_restV_relax"], "quality_metrics": ["rest_sufficiency"]},
+        {"name": "load_response", "any_of": ["EoC_dchgR_60s_inc", "EoD_chgR_60s_inc", "chgCVtime"], "quality_metrics": ["leg_completeness"]}
+      ]},
       "evidence": [
         {"feature": "EoC_dchgR_60s_inc", "direction": "increase", "weight": 1.0, "scale": 20.0},
         {"feature": "EoD_chgR_60s_inc", "direction": "increase", "weight": 1.0, "scale": 20.0},
@@ -87,6 +108,10 @@
     },
     "plating": {
       "description": "Lithium plating suspect patterns (heuristic)",
+      "eligibility": {"required_groups": [
+        {"name": "coulombic", "any_of": ["CE_local_20", "CE"], "quality_metrics": ["leg_completeness"]},
+        {"name": "charge_or_relaxation", "any_of": ["delta_EoC_restV_end", "chg_dVdQ_SOC100"], "quality_metrics": ["samples_per_mV"]}
+      ]},
       "evidence": [
         {"feature": "CE_local_20", "direction": "decrease_from_100", "weight": 1.2, "scale": 3.0},
         {"feature": "CE", "direction": "decrease_from_100", "weight": 0.5, "scale": 3.0,
@@ -98,6 +123,10 @@
     },
     "contact": {
       "description": "Contact / cell-level resistance suspect",
+      "eligibility": {"required_groups": [
+        {"name": "pulse_contact", "any_of": ["EoC_dchgR_10s_inc", "EoD_chgR_10s_inc"], "quality_metrics": ["pulse_sample_count_1s", "pulse_current_stability"]},
+        {"name": "hysteresis_or_drop", "any_of": ["hyst_frac_low", "chg_ir_drop_proxy", "dchg_ir_drop_proxy"], "quality_metrics": ["leg_completeness"]}
+      ]},
       "evidence": [
         {"feature": "EoC_dchgR_10s_inc", "direction": "increase", "weight": 1.3, "scale": 25.0},
         {"feature": "EoD_chgR_10s_inc", "direction": "increase", "weight": 1.3, "scale": 25.0},

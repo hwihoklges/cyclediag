@@ -7,7 +7,8 @@ from typing import Any
 
 DIAGNOSIS_VERSION_FULLCELL = "fullcell_v1"
 DIAGNOSIS_VERSION_HC_CALIBRATED = "hc_calibrated_v1"
-DIAGNOSIS_MODEL_VERSION = "pattern_rule_v1"
+DIAGNOSIS_MODEL_VERSION = "pattern_rule_v2_semantics"
+ELIGIBILITY_CONTRACT_VERSION = "mode_eligibility_v1"
 
 
 @dataclass
@@ -24,6 +25,9 @@ class DiagnosisResult:
     conflicting_features: list[str] = field(default_factory=list)
     data_quality_score: float = 0.0
     diagnosis_valid: bool = False
+    heuristic_support_valid: bool = False
+    scientific_eligible: bool = False
+    eligibility_reasons: list[str] = field(default_factory=list)
     diagnosis_version: str = DIAGNOSIS_VERSION_FULLCELL
     diagnosis_method: str = "rule_pattern"
     diagnosis_model_version: str = DIAGNOSIS_MODEL_VERSION

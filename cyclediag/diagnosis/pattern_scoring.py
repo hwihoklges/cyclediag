@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
+
+from cyclediag.features.measurement_contracts import observed_ve_compatible
 
 from .schema import (
     DIAGNOSIS_MODEL_VERSION,
     DIAGNOSIS_VERSION_FULLCELL,
-    DiagnosisResult,
     PATTERN_MODES,
+    DiagnosisResult,
 )
 
 _CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -106,7 +109,9 @@ def _evidence_for_term(
     # evidence for or against a particular degradation mechanism.
     if feat in {"CE", "CE_local_20"} and not 0 <= val <= 100:
         return feat, None
-    if feat == "VE":
+    if feat in {"VE", "VE_observed"}:
+        if not observed_ve_compatible(row):
+            return feat, None
         units = row.get("feature_units")
         if isinstance(units, Mapping) and units.get("VE", "fraction") != "fraction":
             return feat, None
@@ -117,7 +122,8 @@ def _evidence_for_term(
     if feat.startswith(("R_ct", "R_ohmic", "A_diff", "tau_ct")):
         suffix = feat[feat.rfind("_soc"):] if "_soc" in feat else ""
         fit_valid = row.get(f"dcir_fit_valid{suffix}")
-        if fit_valid is not None and not bool(fit_valid):
+        if fit_valid is not None and not (type(fit_valid) is bool and fit_valid is True
+                                          or type(fit_valid).__name__ == "bool_" and bool(fit_valid)):
             return feat, None
     baseline = None
     if term.get("direction") == "decrease_vs_baseline":
@@ -125,7 +131,9 @@ def _evidence_for_term(
         baseline = _finite((baseline_row or {}).get(ref))
         if baseline is None or baseline == 0:
             return feat, None
-        if feat == "VE" and not 0 < baseline <= 1:
+        if feat in {"VE", "VE_observed"} and (
+            not 0 < baseline <= 1 or not observed_ve_compatible(row, baseline_row)
+        ):
             return feat, None
     signed = _signed_evidence(
         val,
@@ -152,7 +160,7 @@ def score_mode_for_row(
     conflict_thr = float(config.get("conflict_threshold", 0.25))
     min_ev = int(config.get("min_evidence_for_valid", 2))
     collision_thr = float(config.get("mode_collision_score", 0.65))
-    from .constraints import scientific_validity
+    from .constraints import mode_eligibility, scientific_validity
     validity = scientific_validity(row, config)
     validity["warnings"].extend(
         f"missing_baseline:{term.get('baseline_ref') or term['feature']}"
@@ -177,6 +185,8 @@ def score_mode_for_row(
 
     n = len(signed_vals)
     data_quality = float(n / max(1, len(evidence_terms))) if evidence_terms else 0.0
+    eligibility = mode_eligibility(row, config, mode, baseline_row, set(names))
+    validity["eligibility"] = eligibility
 
     if n == 0 or sum(weights) <= 0:
         return DiagnosisResult(
@@ -190,6 +200,8 @@ def score_mode_for_row(
             conflicting_features=[],
             data_quality_score=data_quality,
             diagnosis_valid=False,
+            scientific_eligible=eligibility["eligible"],
+            eligibility_reasons=eligibility["reasons"],
             scientific_validity=validity,
             diagnosis_version=str(config.get("diagnosis_version", DIAGNOSIS_VERSION_FULLCELL)),
             diagnosis_method=str(config.get("diagnosis_method", "rule_pattern")),
@@ -237,8 +249,8 @@ def score_mode_for_row(
     conf *= confidence_multiplier(mode, cflags)
 
     conf = float(np.clip(conf, 0.0, 1.0))
-    valid = n >= min_ev and dq >= 0.3 and conf >= 0.25 and conf > 0.0
-    valid = valid and validity["domain_status"] != "mismatch"
+    support_valid = n >= min_ev and dq >= 0.3 and conf >= 0.25 and conf > 0.0
+    support_valid = support_valid and validity["domain_status"] != "mismatch"
     if validity["domain_status"] == "mismatch":
         conf = 0.0
 
@@ -252,8 +264,12 @@ def score_mode_for_row(
         supporting_features=supporting,
         conflicting_features=conflicting,
         data_quality_score=dq,
-        diagnosis_valid=valid,
-        status="heuristic_support" if valid else "insufficient_or_invalid_evidence",
+        diagnosis_valid=support_valid and eligibility["eligible"],
+        heuristic_support_valid=support_valid,
+        scientific_eligible=eligibility["eligible"],
+        eligibility_reasons=eligibility["reasons"],
+        status="scientifically_eligible" if support_valid and eligibility["eligible"] else
+            "heuristic_unverified" if support_valid else "insufficient_or_invalid_evidence",
         evidence_coverage=data_quality,
         scientific_validity=validity,
         diagnosis_version=str(config.get("diagnosis_version", DIAGNOSIS_VERSION_FULLCELL)),

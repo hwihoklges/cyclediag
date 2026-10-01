@@ -28,6 +28,7 @@ from .schema import (
 META_COLS = (
     "diagnosis_quality_score",
     "diagnosis_valid",
+    "diagnosis_heuristic_support_valid",
     "diagnosis_method",
     "diagnosis_model_version",
     "diagnosis_version",
@@ -48,6 +49,8 @@ def diagnosis_wide_columns(modes: tuple[str, ...] = PATTERN_MODES) -> list[str]:
         cols.append(f"{mode}_evidence_count")
         cols.append(f"{mode}_evidence_coverage")
         cols.append(f"{mode}_status")
+        cols.append(f"{mode}_scientific_eligible")
+        cols.append(f"{mode}_eligibility_reasons")
     cols.extend(META_COLS)
     # Level-2 placeholders (null until validated models exist)
     cols.extend(["LLI_est", "LAM_PE_est", "LAM_NE_est", "electrode_slippage_est"])
@@ -101,12 +104,12 @@ def diagnose_feature_table(
     out = table.copy()
     n = len(out)
     for c in diagnosis_wide_columns(mode_list):
-        if c.endswith(("_features", "_status")) or c in (
+        if c.endswith(("_features", "_status", "_eligibility_reasons")) or c in (
             "diagnosis_method", "diagnosis_model_version", "diagnosis_version",
             "diagnosis_constraints", "scientific_validity",
         ):
             out[c] = pd.Series([None] * n, index=out.index, dtype=object)
-        elif c in ("diagnosis_valid", "diagnosis_scored_row"):
+        elif c in ("diagnosis_valid", "diagnosis_scored_row", "diagnosis_heuristic_support_valid") or c.endswith("_scientific_eligible"):
             out[c] = False
         else:
             out[c] = np.nan
@@ -155,6 +158,8 @@ def diagnose_feature_table(
             )
             qualities = []
             valids = []
+            heuristic_valids = []
+            per_mode = {}
             for mode, res in results.items():
                 out.at[idx, score_column_name(mode)] = res.estimate
                 out.at[idx, confidence_column_name(mode)] = res.confidence
@@ -163,8 +168,12 @@ def diagnose_feature_table(
                 out.at[idx, f"{mode}_evidence_count"] = res.evidence_count
                 out.at[idx, f"{mode}_evidence_coverage"] = res.evidence_coverage
                 out.at[idx, f"{mode}_status"] = res.status
+                out.at[idx, f"{mode}_scientific_eligible"] = res.scientific_eligible
+                out.at[idx, f"{mode}_eligibility_reasons"] = res.eligibility_reasons
                 qualities.append(res.data_quality_score)
                 valids.append(res.diagnosis_valid)
+                heuristic_valids.append(res.heuristic_support_valid)
+                per_mode[mode] = res.scientific_validity["eligibility"]
                 sidecar_rows.append({
                     "cycle": row_dict.get("cycle"),
                     "tagged_cycle": row_dict.get("tagged_cycle"),
@@ -175,12 +184,15 @@ def diagnose_feature_table(
 
             out.at[idx, "diagnosis_quality_score"] = float(np.nanmean(qualities)) if qualities else 0.0
             validity = out.at[idx, "scientific_validity"]
+            validity["per_mode"] = per_mode
             validity["warnings"] = list(dict.fromkeys(
                 warning for result in results.values()
                 for warning in result.scientific_validity["warnings"]
             ))
             out.at[idx, "diagnosis_valid"] = bool(any(valids))
-            out.at[idx, "diagnosis_status"] = "heuristic_support" if any(valids) else "unknown"
+            out.at[idx, "diagnosis_heuristic_support_valid"] = bool(any(heuristic_valids))
+            out.at[idx, "diagnosis_status"] = ("scientifically_eligible" if any(valids) else
+                                               "heuristic_unverified" if any(heuristic_valids) else "unknown")
             out.at[idx, "diagnosis_scored_row"] = True
             out.at[idx, "diagnosis_method"] = str(cfg.get("diagnosis_method", "rule_pattern"))
             out.at[idx, "diagnosis_model_version"] = str(

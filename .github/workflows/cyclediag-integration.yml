@@ -45,11 +45,36 @@ jobs:
         run: |
           python -m cyclediag.tools.run_sohq_bp_presentation --cells M01Ch022 --step 40 --out example/output/sohq_bp_presentation
           python -c "from pathlib import Path; p=Path('example/output/sohq_bp_presentation'); assert list(p.rglob('*.png')) and list(p.rglob('*.csv')), 'Expected figures and tables'"
+      - name: Scientific-contract export on the same fixture
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from cyclediag.tools.run_sohq_bp_presentation import load_raw, tagged_routine_cycles
+          from cyclediag.features.lges_extract import LgesExtractConfig, extract_lges_features_table
+
+          raw = load_raw(Path('example/fixtures/doe/DOE1/set4_SJ900/M01Ch022_raw.csv'))
+          cycles = tagged_routine_cycles(raw)[:2]
+          assert cycles, 'No routine cycles found in independent fixture loader'
+          sample = raw[raw['cycle'].isin(cycles)].copy()
+          table = extract_lges_features_table(
+              sample, cycles=cycles, raw_df=sample,
+              config=LgesExtractConfig(enrich_assb=False, with_diagnosis=True),
+          )
+          assert not table.empty, 'No cycle features extracted'
+          assert {'diagnosis_status', 'scientific_validity', 'diagnosis_valid'}.issubset(table.columns)
+          assert any(c.endswith('_eligibility_reasons') for c in table.columns)
+          assert not table['diagnosis_valid'].fillna(False).any(), 'No comparable protocol calibration supplied'
+          out = Path('example/output/science_check')
+          out.mkdir(parents=True, exist_ok=True)
+          table.to_csv(out / 'M01Ch022_scientific_contract.csv', index=False)
+          print('scientific_contract_rows:', len(table))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: m01ch022-presentation
           path: |
             example/output/sohq_bp_presentation/
+            example/output/science_check/
             resolved-dependencies.txt
           retention-days: 14

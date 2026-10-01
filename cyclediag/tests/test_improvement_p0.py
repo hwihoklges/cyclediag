@@ -60,7 +60,7 @@ def test_signal_cv_detects_taper():
 def test_hysteresis_soc_bands():
     q = np.linspace(0, 1, 200)
     vc = 3.5 + 0.5 * q
-    vd = 3.4 + 0.5 * q
+    vd = 3.9 - 0.5 * q
     h = hysteresis_metrics(q, vc, q, vd)
     assert h["hyst_area"] is not None and h["hyst_area"] > 0
     assert h["hyst_area_low"] is not None
