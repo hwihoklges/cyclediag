@@ -100,6 +100,9 @@ INSPECT_COLS: tuple[str, ...] = (
     "LAM_NE_confidence",
     "diagnosis_quality_score",
     "diagnosis_valid",
+    "diagnosis_heuristic_support_valid",
+    "diagnosis_status",
+    "scientific_validity",
     "diagnosis_version",
 )
 

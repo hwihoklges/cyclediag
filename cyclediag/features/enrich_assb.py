@@ -210,6 +210,8 @@ def enrich_feature_table(
     rest_current_max: float | None = None,
     expected_pulse_current: float | None = None,
     protocol_meta: CellProtocolMeta | None = None,
+    pulse_threshold_assumed: bool = True,
+    pulse_threshold_explicit: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Attach Q_relax, DCIR decompose, self-discharge, quality, RCF, PER."""
     pm = protocol_meta or CellProtocolMeta()
@@ -338,7 +340,15 @@ def enrich_feature_table(
 
     for cyc in out["cycle"].astype(int).unique():
         g = raw_df[raw_df["cycle"] == int(cyc)]
-        qm = cycle_quality_metrics(g, rest_current_max=rest_current_max)
+        qm = cycle_quality_metrics(
+            g, rest_current_max=rest_current_max,
+            pulse_current_threshold_a=expected_pulse_current if pulse_threshold_explicit else None,
+            nominal_capacity_ah=None if pulse_threshold_explicit else pm.q_rated_ah,
+            pulse_c_rate=None if pulse_threshold_explicit else pm.dcir_c_rate,
+        )
+        if pulse_threshold_assumed:
+            qm["pulse_threshold_source"] = "legacy_protocol_default_unverified"
+            qm["scientific_validity"]["warnings"].append("pulse_threshold_legacy_default_unverified")
         mask = out["cycle"] == int(cyc)
         for k, val in qm.items():
             key = "quality_scientific_validity" if k == "scientific_validity" else k

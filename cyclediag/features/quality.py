@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -33,14 +34,61 @@ def _quant_step(v: np.ndarray) -> float | None:
     return float(np.min(d))
 
 
+def _resolve_pulse_threshold(
+    pulse_current_threshold_a: float | None,
+    nominal_capacity_ah: float | None,
+    pulse_c_rate: float | None,
+) -> tuple[float | None, str]:
+    """Only explicit amperes or an explicit Ah × h⁻¹ contract can define a pulse."""
+    if pulse_current_threshold_a is not None:
+        value, source = pulse_current_threshold_a, "explicit_A"
+    elif nominal_capacity_ah is not None and pulse_c_rate is not None:
+        value, source = nominal_capacity_ah * pulse_c_rate, "nominal_Ah_times_C_rate"
+    else:
+        return None, "unconfigured"
+    if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) <= 0:
+        raise ValueError("Pulse current threshold must be finite and positive (A)")
+    return float(value), source
+
+
+def _continuous_windows(mask: np.ndarray, current: np.ndarray, time: np.ndarray, step: np.ndarray | None) -> list[np.ndarray]:
+    """Separate gaps, step changes, direction changes, and invalid/reset clocks."""
+    windows: list[list[int]] = []
+    active: list[int] = []
+    for idx, valid in enumerate(mask):
+        if not valid or not np.isfinite(time[idx]):
+            if active:
+                windows.append(active)
+                active = []
+            continue
+        if active:
+            prev = active[-1]
+            boundary = (time[idx] <= time[prev] or
+                        (step is not None and (pd.isna(step[idx]) or pd.isna(step[prev]) or step[idx] != step[prev])) or
+                        (np.sign(current[idx]) != np.sign(current[prev])))
+            if boundary:
+                windows.append(active)
+                active = []
+        active.append(idx)
+    if active:
+        windows.append(active)
+    return [np.asarray(window, dtype=int) for window in windows]
+
+
 def cycle_quality_metrics(
     cycle_df: pd.DataFrame,
     *,
     expected_v_window: tuple[float, float] = (2.5, 4.2),
     rest_current_max: float = 0.5,
     tau_relax_est: float | None = None,
+    pulse_current_threshold_a: float | None = None,
+    nominal_capacity_ah: float | None = None,
+    pulse_c_rate: float | None = None,
 ) -> dict[str, Any]:
-    """Compute per-cycle quality fields from raw points."""
+    """Compute per-cycle quality; step_time is elapsed seconds, never an index proxy."""
+    threshold, threshold_source = _resolve_pulse_threshold(
+        pulse_current_threshold_a, nominal_capacity_ah, pulse_c_rate,
+    )
     out: dict[str, Any] = {
         "samples_per_mV": None,
         "v_noise_sigma": None,
@@ -49,6 +97,8 @@ def cycle_quality_metrics(
         "rest_sufficiency": None,
         "pulse_sample_count_1s": None,
         "pulse_current_stability": None,
+        "pulse_threshold_a": threshold,
+        "pulse_threshold_source": threshold_source,
         "leg_completeness": None,
         "temperature_available": False,
         "quality_score": None,
@@ -59,7 +109,8 @@ def cycle_quality_metrics(
             "score_kind": "heuristic_data_quality_not_probability",
             "warnings": ["voltage_window_and_quality_targets_require_protocol_validation",
                          "voltage_span_not_per_leg_completeness",
-                         "dqdv_snr_is_voltage_span_noise_proxy"],
+                         "dqdv_snr_is_voltage_span_noise_proxy",
+                         "pulse_threshold_requires_protocol_validation"],
         },
     }
     if cycle_df is None or cycle_df.empty or "voltage" not in cycle_df.columns:
@@ -86,40 +137,37 @@ def cycle_quality_metrics(
         out["leg_completeness"] = min(1.0, covered / expect)
 
     if "current" in cycle_df.columns:
-        i = pd.to_numeric(cycle_df["current"], errors="coerce").abs().to_numpy()
+        current = pd.to_numeric(cycle_df["current"], errors="coerce").to_numpy(dtype=float)
+        i = np.abs(current)
         if "step_time" in cycle_df.columns:
-            st = pd.to_numeric(cycle_df["step_time"], errors="coerce").to_numpy()
+            st = pd.to_numeric(cycle_df["step_time"], errors="coerce").to_numpy(dtype=float)
         else:
             st = None
-        pulse = np.isfinite(i) & (i > max(rest_current_max * 10, 20.0))
-        if pulse.any() and st is not None:
-            p0 = int(np.argmax(pulse))
-            t0 = float(st[p0]) if np.isfinite(st[p0]) else 0.0
-            early = pulse & np.isfinite(st) & ((st - t0) <= 1.0) & ((st - t0) >= 0)
-            # only within first pulse step
-            out["pulse_sample_count_1s"] = int(early.sum())
-            ii = i[pulse]
-            if len(ii) > 5:
-                out["pulse_current_stability"] = float(np.nanstd(ii) / max(np.nanmedian(ii), 1e-9))
-
-        rest = np.isfinite(i) & (i <= rest_current_max)
-        if rest.any() and st is not None:
-            # longest rest duration
-            best = 0.0
-            a = None
-            for idx, flag in enumerate(rest):
-                if flag and a is None:
-                    a = idx
-                elif not flag and a is not None:
-                    dur = float(st[idx - 1] - st[a]) if np.isfinite(st[idx - 1]) and np.isfinite(st[a]) else 0.0
-                    best = max(best, dur)
-                    a = None
-            if a is not None:
-                dur = float(st[len(rest) - 1] - st[a]) if np.isfinite(st[-1]) and np.isfinite(st[a]) else 0.0
-                best = max(best, dur)
-            if tau_relax_est is not None and np.isfinite(tau_relax_est) and tau_relax_est > 0:
-                out["rest_sufficiency"] = best / tau_relax_est
+        step_col = next((col for col in ("StepNo", "step_no", "step") if col in cycle_df), None)
+        step = cycle_df[step_col].to_numpy() if step_col else None
+        if st is None:
+            out["scientific_validity"]["warnings"].append("pulse_and_rest_time_unavailable")
+        else:
+            if threshold is not None:
+                pulse = np.isfinite(i) & (i >= threshold)
+                windows = _continuous_windows(pulse, current, st, step)
+                if windows:
+                    first = windows[0]
+                    early = first[(st[first] - st[first[0]]) <= 1.0]
+                    out["pulse_sample_count_1s"] = len(early)
+                    if len(first) > 1 and np.median(i[first]) > 0:
+                        out["pulse_current_stability"] = float(np.std(i[first]) / np.median(i[first]))
             else:
+                out["scientific_validity"]["warnings"].append("pulse_threshold_unconfigured")
+
+            rest = np.isfinite(i) & (i <= rest_current_max)
+            windows = _continuous_windows(rest, current, st, step)
+            if windows:
+                best = max(float(st[win[-1]] - st[win[0]]) for win in windows)
+            if tau_relax_est is not None and np.isfinite(tau_relax_est) and tau_relax_est > 0:
+                if windows:
+                    out["rest_sufficiency"] = best / tau_relax_est
+            elif windows:
                 out["scientific_validity"]["warnings"].append("rest_sufficiency_requires_measured_tau")
 
     # simple SNR proxy: v span / noise

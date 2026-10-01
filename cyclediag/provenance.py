@@ -16,7 +16,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-ALGORITHM_SCHEMA = "cyclediag_scientific_v1"
+ALGORITHM_SCHEMA = "cyclediag_scientific_v2"
 ATTR_KEYS = ("unit_metadata", "unit_warnings", "unit_schema", "unit_missing_fields",
              "scientific_warnings", "feature_units", "provenance")
 

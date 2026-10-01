@@ -196,6 +196,11 @@ def test_peak_cycle_match_never_suppresses_alert_or_missing(monkeypatch, tmp_pat
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "diagnosis" / "config"
 
 
+def ve_metadata():
+    return {"feature_semantics": {"VE": "observed_window_v2"},
+            "observed_window": {leg: {"status": "ok"} for leg in ("charge", "discharge")}}
+
+
 @pytest.mark.parametrize("filename", ["mode_weights_fullcell_v1.json", "mode_weights_assb_si_v1.json"])
 def test_ve_loss_monotonic_and_missing_reference_unscorable(filename):
     cfg = load_mode_weights(CONFIG_DIR / filename)
@@ -206,7 +211,8 @@ def test_ve_loss_monotonic_and_missing_reference_unscorable(filename):
             assert term["direction"] == "decrease_vs_baseline"
             assert term["baseline_ref"] == "VE"
             only_ve = {**cfg, "modes": {mode: {"evidence": [term]}}}
-            scores = [score_mode_for_row({"VE": v}, mode, only_ve, baseline_row={"VE": .95}).estimate
+            scores = [score_mode_for_row({"VE": v, **ve_metadata()}, mode, only_ve,
+                                        baseline_row={"VE": .95, **ve_metadata()}).estimate
                       for v in (.95, .9, .8)]
             assert scores[0] == 0 < scores[1] < scores[2]
             missing = score_mode_for_row({"VE": .8}, mode, only_ve)
@@ -241,6 +247,8 @@ def test_diagnosis_missing_baseline_and_cell_separation():
     table = pd.DataFrame({"cell_id": ["a", "a", "b", "b"], "cycle": [1, 2, 1, 2],
                           "VE": [.95, .8, .8, .8]}, index=[10, 11, 12, 13])
     path = CONFIG_DIR / "mode_weights_fullcell_v1.json"
+    for key in ve_metadata():
+        table[key] = [ve_metadata()[key] for _ in range(len(table))]
     out = diagnose_feature_table(table, config_path=path)
     assert out.loc[11, "LLI_pattern_score"] > 0
     assert out.loc[13, "LLI_pattern_score"] == 0

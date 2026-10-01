@@ -32,7 +32,7 @@ def test_capacity_weighted_v_avg():
 def test_hysteresis_positive_area():
     q = np.linspace(0, 1, 100)
     chg_v = 3.0 + q
-    dchg_v = 2.9 + q
+    dchg_v = 3.9 - q
     out = hysteresis_metrics(q, chg_v, q, dchg_v)
     assert out["hyst_area"] is not None and out["hyst_area"] > 0
     assert out["hyst_max_dV"] == pytest.approx(0.1, abs=0.02)
@@ -40,7 +40,7 @@ def test_hysteresis_positive_area():
 
 def test_correct_r_to_25c_hotter_is_lower_raw_maps_up():
     r45 = 10.0
-    r25 = correct_r_to_25c(r45, 45.0)
+    r25 = correct_r_to_25c(r45, 45.0, ea=20_000.0)
     assert r25 is not None and r25 > r45
 
 
@@ -48,12 +48,14 @@ def test_extract_shape_has_soc_bands():
     n = 200
     q = np.linspace(0, 100, n)
     chg = pd.DataFrame({
+        "step_time": np.arange(n, dtype=float),
         "voltage": 3.0 + 1.1 * (q / 100),
         "capacity": q,
         "charge_capacity": q,
         "current": np.ones(n),
     })
     dchg = pd.DataFrame({
+        "step_time": np.arange(n, dtype=float),
         "voltage": 4.1 - 0.9 * (q / 100) - 0.5 * np.exp(-((q - 97) ** 2) / 4),
         "capacity": q,
         "discharge_capacity": q,

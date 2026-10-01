@@ -6,8 +6,120 @@ physicochemical mode interpretation (Track B) is under-determined.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
 import math
+from collections.abc import Mapping
+from typing import Any
+
+from .schema import ELIGIBILITY_CONTRACT_VERSION
+
+
+def _affirmed(value: Any) -> bool:
+    return (type(value) is bool and value is True) or (type(value).__name__ == "bool_" and bool(value))
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, (bool, str)) or value is None:
+        return None
+    try:
+        result = float(value)
+        return result if math.isfinite(result) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def mode_eligibility(
+    row: Mapping[str, Any], config: Mapping[str, Any], mode: str,
+    baseline_row: Mapping[str, Any] | None, available_features: set[str],
+) -> dict[str, Any]:
+    """Conservative scientific interpretation contract; scores never fill missing gates.
+
+    A configuration without declared requirements remains exploratory, not validated.
+    Group evidence consists of *usable* terms, not merely present columns.
+    """
+    spec = (config.get("modes") or {}).get(mode, {}).get("eligibility")
+    reasons: list[str] = []
+    groups: dict[str, bool] = {}
+    domain = config.get("chemistry")
+    if not isinstance(domain, str) or not domain.strip() or not isinstance(row.get("chemistry"), str) or not row["chemistry"].strip():
+        reasons.append("chemistry_unverified")
+    elif row["chemistry"] != domain:
+        reasons.append("chemistry_mismatch")
+
+    if not isinstance(spec, Mapping) or not spec.get("required_groups"):
+        reasons.append("eligibility_contract_unconfigured")
+        return {"contract_version": ELIGIBILITY_CONTRACT_VERSION, "eligible": False,
+                "reasons": reasons, "required_groups": groups}
+
+    semantics = row.get("feature_semantics")
+    if not isinstance(semantics, Mapping) or semantics.get("schema") != "lges_measurements_v2":
+        reasons.append("feature_semantics_unverified")
+
+    if (not _affirmed(row.get("protocol_comparable")) or row.get("protocol_kind") != "routine"
+            or row.get("protocol_excluded") is not False):
+        reasons.append("protocol_unverified_or_incompatible")
+    quality = _finite_number(row.get("quality_score"))
+    coverage = _finite_number(row.get("quality_evidence_coverage"))
+    if (row.get("quality_status") not in ("assessed", "partial") or quality is None
+            or quality <= 0 or coverage is None or coverage <= 0):
+        reasons.append("quality_unverified")
+    failed = row.get("quality_gate_failed_groups")
+    if not isinstance(failed, str) or failed.strip().lower() in ("nan", "none"):
+        reasons.append("quality_groups_unverified")
+        failed_groups: set[str] = set()
+    else:
+        failed_groups = {s.strip() for s in failed.split(",") if s.strip()}
+
+    for group in spec["required_groups"]:
+        name = group["name"]
+        features = group["any_of"]
+        present = any(f in available_features for f in features)
+        groups[name] = present
+        if not present:
+            reasons.append(f"required_group_missing:{name}")
+        for metric in group.get("quality_metrics", []):
+            gate = {"pulse_current_stability": "pulse_stability"}.get(metric, metric)
+            value = _finite_number(row.get(metric))
+            if gate in failed_groups or value is None or (metric != "pulse_current_stability" and value <= 0):
+                reasons.append(f"required_quality_unverified:{name}:{metric}")
+        if group.get("fit") and not _affirmed(row.get(group["fit"])):
+            reasons.append(f"fit_unverified:{name}")
+
+    terms = (config.get("modes") or {})[mode].get("evidence") or []
+    used = [t for t in terms if t["feature"] in available_features]
+    for term in used:
+        feature = term["feature"]
+        if feature.startswith(("R_ct", "R_ohmic", "A_diff", "tau_ct")):
+            suffix = feature[feature.rfind("_soc"):] if "_soc" in feature else ""
+            if not _affirmed(row.get(f"dcir_fit_valid{suffix}")):
+                reasons.append(f"fit_unverified:{feature}")
+    if any(t.get("direction") == "decrease_vs_baseline" or t["feature"].startswith("delta_") for t in used):
+        if (not isinstance(baseline_row, Mapping) or baseline_row.get("protocol_kind") != "routine"
+            or baseline_row.get("protocol_excluded") is not False
+            or not _affirmed(baseline_row.get("protocol_comparable"))):
+            reasons.append("baseline_protocol_unverified")
+        if (isinstance(baseline_row, Mapping) and
+            (baseline_row.get("chemistry") != row.get("chemistry") or
+             not isinstance(row.get("protocol_id"), str) or not row["protocol_id"].strip() or
+             row["protocol_id"] != baseline_row.get("protocol_id"))):
+            reasons.append("baseline_protocol_mismatch_or_unknown")
+        meta = row.get("baseline_semantics")
+        if (not isinstance(meta, Mapping) or not isinstance(baseline_row, Mapping)
+                or _finite_number(meta.get("cycle")) != _finite_number(baseline_row.get("cycle"))
+                or _finite_number(meta.get("requested_cycle")) != _finite_number(meta.get("cycle"))
+                or not isinstance(meta.get("feature_semantics"), Mapping)):
+            reasons.append("baseline_unverified")
+        else:
+            sem = row.get("feature_semantics")
+            if not isinstance(sem, Mapping) or sem != meta["feature_semantics"]:
+                reasons.append("feature_semantics_mismatch")
+    if any(t["feature"] in ("VE", "VE_observed") for t in used):
+        from cyclediag.features.measurement_contracts import observed_ve_compatible
+        if not observed_ve_compatible(row, baseline_row):
+            reasons.append("observed_window_unverified")
+
+    return {"contract_version": ELIGIBILITY_CONTRACT_VERSION,
+            "eligible": not reasons, "reasons": list(dict.fromkeys(reasons)),
+            "required_groups": groups}
 
 
 def scientific_validity(row: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
@@ -78,7 +190,7 @@ def constraint_flags(
         flags.append("halfcell_uncalibrated")
 
     # protocol contamination — diagnosis should not trust these rows
-    if bool(row.get("protocol_excluded")):
+    if row.get("protocol_excluded") is not False and row.get("protocol_excluded") is not None:
         flags.append("protocol_excluded")
     kind = str(row.get("protocol_kind") or "")
     if kind and kind not in ("routine", "unknown", "nan", ""):
@@ -86,7 +198,7 @@ def constraint_flags(
 
     failed_groups = row.get("quality_gate_failed_groups")
     if isinstance(failed_groups, str) and failed_groups.strip() not in ("", "nan"):
-        flags.append("quality_gate_failed")
+        flags.append("quality_groups_failed")
     try:
         if float(row.get("quality_score")) <= 0:
             flags.append("quality_gate_failed")

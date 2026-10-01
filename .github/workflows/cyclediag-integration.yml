@@ -45,11 +45,16 @@ jobs:
         run: |
           python -m cyclediag.tools.run_sohq_bp_presentation --cells M01Ch022 --step 40 --out example/output/sohq_bp_presentation
           python -c "from pathlib import Path; p=Path('example/output/sohq_bp_presentation'); assert list(p.rglob('*.png')) and list(p.rglob('*.csv')), 'Expected figures and tables'"
+      - name: Scientific-contract export on the same fixture
+        run: |
+          python -m cyclediag.tools.export_degradation_diagnosis --input example/fixtures/doe/DOE1/set4_SJ900/M01Ch022_raw.csv --out-dir example/output/science_check
+          python -c "from pathlib import Path; import pandas as pd; p=Path('example/output/science_check'); files=list(p.glob('*_diagnosis_scores.csv')); assert files; t=pd.read_csv(files[0]); assert not t.empty; assert {'diagnosis_status','scientific_validity','diagnosis_valid'}.issubset(t.columns); assert any(c.endswith('_eligibility_reasons') for c in t.columns); assert not t.diagnosis_valid.fillna(False).any(), 'No comparable protocol calibration supplied'"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: m01ch022-presentation
           path: |
             example/output/sohq_bp_presentation/
+            example/output/science_check/
             resolved-dependencies.txt
           retention-days: 14
