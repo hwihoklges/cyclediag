@@ -210,10 +210,14 @@ def enrich_feature_table(
     rest_current_max: float | None = None,
     expected_pulse_current: float | None = None,
     protocol_meta: CellProtocolMeta | None = None,
-    pulse_threshold_assumed: bool = True,
-    pulse_threshold_explicit: bool = False,
+    pulse_threshold_assumed: bool | None = None,
+    pulse_threshold_explicit: bool | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Attach Q_relax, DCIR decompose, self-discharge, quality, RCF, PER."""
+    if pulse_threshold_explicit is None:
+        pulse_threshold_explicit = expected_pulse_current is not None
+    if pulse_threshold_assumed is None:
+        pulse_threshold_assumed = expected_pulse_current is None and protocol_meta is None
     pm = protocol_meta or CellProtocolMeta()
     if rest_current_max is None:
         rest_current_max = pm.rest_current_max_a
